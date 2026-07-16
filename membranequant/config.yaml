@@ -1,0 +1,40 @@
+# MembraneQuant default configuration
+# All parameters are tunable for paper-level reproducibility.
+
+# Preprocessing
+rolling_ball_radius: 50
+gaussian_sigma: 1
+enable_denoise: true
+
+# Whole-cell segmentation (EGFP or EGFP+DiI; NOT DiI alone)
+# method: otsu (built-in) | cellpose (optional: pip install cellpose)
+segmentation_method: otsu
+segmentation_channel: green  # green | green_red
+threshold: otsu
+minimum_cell_area: 500
+maximum_cell_area: 50000
+max_eccentricity: 0.98
+max_saturation_fraction: 0.05
+
+# Cellpose (only when segmentation_method: cellpose)
+cellpose_model: cyto2
+cellpose_diameter: 0      # 0 = auto-estimate
+cellpose_gpu: false
+cellpose_flow_threshold: 0.4
+cellpose_cellprob_threshold: 0.0
+
+# Membrane ring (geometry from cell boundary, not DiI threshold)
+ring_width: 3  # 2, 3, 4, or 5 recommended
+
+# Quality control
+minimum_ring_pixels: 100
+minimum_red_coverage: 0.5
+
+# Export
+save_overlay: true
+save_mask: true
+save_graphpad: true
+compute_pearson: false
+
+# Output relative to selected experiment root (or --output)
+output_dir: Results

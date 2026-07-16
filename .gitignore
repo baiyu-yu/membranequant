@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Unit test / coverage reports
+.pytest_cache/
+.mypy_cache/
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Project local results and large biological image formats
+Results/
+results/
+**/Results/
+**/results/
+*.tif
+*.tiff
+*.png
+*.csv
+*.xlsx
+
+# IDEs and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+命令行.cmd
