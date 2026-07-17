@@ -93,7 +93,7 @@ def test_rgb_green_channel_not_zero():
     from membranequant.utils import normalize_to_unit, to_grayscale
 
     rgb = np.zeros((32, 32, 3), dtype=np.uint8)
-    rgb[..., 1] = 120  # green plane only
+    rgb[10:20, 10:20, 1] = 120  # green plane only (non-uniform)
     g = to_grayscale(rgb)
     assert g.shape == (32, 32)
     assert float(g.mean()) > 0
@@ -101,7 +101,7 @@ def test_rgb_green_channel_not_zero():
     assert float(n.max()) == 1.0
 
     rgb_r = np.zeros((32, 32, 3), dtype=np.uint8)
-    rgb_r[..., 0] = 200
+    rgb_r[10:20, 10:20, 0] = 200
     r = to_grayscale(rgb_r)
     assert float(r.mean()) > 0
 

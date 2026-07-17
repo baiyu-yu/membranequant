@@ -37,6 +37,17 @@ def measure_cells(
 
     props = {int(p.label): p for p in regionprops(labels)}
 
+    # Calculate global Otsu threshold of the preprocessed red image
+    # to serve as a robust baseline for true signal vs noise.
+    try:
+        from skimage.filters import threshold_otsu
+        if red.max() > red.min() + 1e-6:
+            global_red_thr = float(threshold_otsu(red))
+        else:
+            global_red_thr = 0.1
+    except Exception:
+        global_red_thr = 0.1
+
     for cid in masks.kept_ids:
         whole = labels == cid
         mem = membrane == cid
@@ -54,10 +65,10 @@ def measure_cells(
         cg_mean, cg_int, cyto_n = _sum_mean(green, cyto)
 
         # Red coverage on membrane ring: fraction of ring pixels with DiI signal
-        # Use adaptive-ish floor: mean of ring red * 0.5 or global low threshold
+        # Use global Otsu threshold of the red channel (permissive 50% scale)
         if mem_n > 0:
             red_ring = red[mem]
-            red_thr = max(float(np.percentile(red_ring, 25)) * 0.5, 1e-6)
+            red_thr = max(global_red_thr * 0.5, 1e-6)
             red_cov_area = int(np.count_nonzero(red_ring > red_thr))
             red_coverage = red_cov_area / mem_n
         else:

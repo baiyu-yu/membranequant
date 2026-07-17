@@ -150,6 +150,8 @@ def run_from_ui(
     save_graphpad: bool,
     compute_pearson: bool,
     config_path: str | None,
+    cellpose_flow_threshold: float = 0.4,
+    cellpose_cellprob_threshold: float = 0.0,
     progress=None,
 ) -> tuple[str, Any, Any, list[str]]:
     """从 Web 界面执行完整分析流程。"""
@@ -193,6 +195,8 @@ def run_from_ui(
         "cellpose_model": cellpose_model or "cyto2",
         "cellpose_diameter": float(cellpose_diameter),
         "cellpose_gpu": bool(cellpose_gpu),
+        "cellpose_flow_threshold": float(cellpose_flow_threshold),
+        "cellpose_cellprob_threshold": float(cellpose_cellprob_threshold),
         "save_overlay": bool(save_overlay),
         "save_mask": bool(save_mask),
         "save_graphpad": bool(save_graphpad),
@@ -423,6 +427,22 @@ def build_app(config_path: Path | None = None):
                         value=bool(cfg.cellpose_gpu),
                         info="有 NVIDIA GPU 且已装好 CUDA 版 PyTorch 时可勾选，会快很多；没有 GPU 请不要勾。",
                     )
+                    cellpose_flow_threshold = gr.Slider(
+                        minimum=0.0,
+                        maximum=1.0,
+                        value=float(cfg.cellpose_flow_threshold),
+                        step=0.05,
+                        label="Cellpose 流量阈值 (flow_threshold)",
+                        info="控制识别的细胞形状与流向匹配程度。默认 0.4。调高会检测到更多细胞但形状可能不规则，调低会更严格。",
+                    )
+                    cellpose_cellprob_threshold = gr.Slider(
+                        minimum=-6.0,
+                        maximum=6.0,
+                        value=float(cfg.cellpose_cellprob_threshold),
+                        step=0.5,
+                        label="Cellpose 细胞概率阈值 (cellprob_threshold)",
+                        info="控制检测细胞的置信度。默认 0.0。调小（如 -2.0）会检测到更多弱信号细胞，调大（如 2.0）会只保留强信号细胞。",
+                    )
 
                 seg_channel = gr.Radio(
                     choices=[
@@ -613,6 +633,8 @@ def build_app(config_path: Path | None = None):
                 save_graphpad,
                 compute_pearson,
                 config_file,
+                cellpose_flow_threshold,
+                cellpose_cellprob_threshold,
             ],
             outputs=[report, results_table, summary_table, gallery],
         )
