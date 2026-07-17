@@ -18,7 +18,14 @@ class Config:
     rolling_ball_radius: int = 50
     gaussian_sigma: float = 1.0
     enable_denoise: bool = True
-    # Whole-cell segmentation: otsu (default) | cellpose (optional dependency)
+    # Whole-cell segmentation methods:
+    # - otsu: 经典Otsu阈值（默认）
+    # - watershed_distance: 距离变换+分水岭（适合圆形粘连细胞）
+    # - watershed_gradient: 梯度+分水岭（适合边界清晰的细胞）
+    # - hminima_watershed: H-minima+分水岭（适合密集粘连细胞）
+    # - morphological_opening: 形态学开运算（适合轻度粘连）
+    # - combined_markers: 距离+梯度双重markers（综合方法）
+    # - cellpose: 深度学习（需安装cellpose）
     segmentation_method: str = "otsu"
     segmentation_channel: str = "green"  # green | green_red
     threshold: str = "otsu"
@@ -107,8 +114,14 @@ def load_config(path: str | Path | None = None, overrides: dict[str, Any] | None
 
 def _validate_config(cfg: Config) -> None:
     method = cfg.segmentation_method.strip().lower()
-    if method not in {"otsu", "cellpose"}:
-        raise ValueError("segmentation_method must be 'otsu' or 'cellpose'")
+    valid_methods = {
+        "otsu", "cellpose", "watershed_distance", "watershed_gradient",
+        "hminima_watershed", "morphological_opening", "combined_markers"
+    }
+    if method not in valid_methods:
+        raise ValueError(
+            f"segmentation_method must be one of: {', '.join(sorted(valid_methods))}"
+        )
     cfg.segmentation_method = method
     if cfg.segmentation_channel not in {"green", "green_red"}:
         raise ValueError("segmentation_channel must be 'green' or 'green_red'")

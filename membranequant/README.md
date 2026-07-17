@@ -75,18 +75,44 @@ Filename pattern: `{prefix?}{experiment}{drug}-{field}[-{channel}].tif`
 # default Otsu segmentation
 python -m membranequant.main --input Experiment --output Results
 
+# 🆕 NEW: Multiple watershed methods for adhered cells
+python -m membranequant.main -i Experiment -o Results --seg watershed_distance
+python -m membranequant.main -i Experiment -o Results --seg hminima_watershed
+python -m membranequant.main -i Experiment -o Results --seg combined_markers
+
 # optional Cellpose path
 python -m membranequant.main -i Experiment -o Results --cellpose
 python -m membranequant.main -i Experiment --seg cellpose --cellpose-model cyto2 --cellpose-diameter 0
 
-# Web UI
+# Web UI (recommended)
 python -m membranequant.main --webui --port 7860
 ```
+
+### 🆕 Segmentation Methods (2026-07 Update)
+
+For **severely adhered cells**, we now provide **6 classical image processing methods** (no ML required):
+
+| Method | Speed | Adhesion | Best For | Install |
+|--------|-------|----------|----------|---------|
+| `otsu` | ⚡⚡⚡ | ❌ | No adhesion (default) | ❌ |
+| `watershed_distance` | ⚡⚡ | ⭐⭐⭐ | Round/oval adhered cells (**recommended first**) | ❌ |
+| `watershed_gradient` | ⚡⚡ | ⭐⭐ | Clear boundaries | ❌ |
+| `hminima_watershed` | ⚡ | ⭐⭐⭐ | Dense cells, over-segmentation | ❌ |
+| `morphological_opening` | ⚡⚡⚡ | ⭐ | Mild adhesion | ❌ |
+| `combined_markers` | ⚡ | ⭐⭐⭐ | Fallback/robust | ❌ |
+| `cellpose` | 🐌 | ⭐⭐⭐⭐ | Last resort | ✅ `pip install cellpose` |
+
+**Recommended workflow for adhesion:**
+1. Try `watershed_distance` (ImageJ classic watershed)
+2. If over-segmented → `hminima_watershed`
+3. If still not good → `combined_markers`
+
+See detailed guide: `粘连细胞分割方法说明.md` (Chinese) or `分割方法快速参考.txt`
 
 Useful flags:
 
 ```text
---seg otsu|cellpose
+--seg otsu|watershed_distance|watershed_gradient|hminima_watershed|morphological_opening|combined_markers|cellpose
 --cellpose                 # alias for --seg cellpose
 --cellpose-model cyto2
 --cellpose-diameter 0      # 0 = auto
@@ -102,7 +128,9 @@ Useful flags:
 
 - Input / output folder paths (local experiment directory)
 - **Preview pairs** before running
-- Segmentation: **otsu** or **cellpose**
+- Segmentation: **otsu**, **6 watershed variants for adhesion**, or **cellpose**
+  - 🆕 Dropdown menu with detailed descriptions for each method
+  - 🆕 Built-in guidance for choosing the right method
 - Ring width, area filters, Red Coverage QC, preprocess options
 - Live-ish log + `summary.csv` / `results.csv` tables + overlay gallery
 
@@ -129,13 +157,20 @@ Also: MembraneFraction, RedCoverage (QC).
 See `config.yaml`:
 
 ```yaml
-segmentation_method: otsu   # or cellpose
+segmentation_method: otsu   # otsu, watershed_distance, watershed_gradient,
+                            # hminima_watershed, morphological_opening, 
+                            # combined_markers, or cellpose
 cellpose_model: cyto2
 cellpose_diameter: 0
 cellpose_gpu: false
 ring_width: 3
 ...
 ```
+
+**For adhered cells**, change `segmentation_method` to:
+- `watershed_distance` (recommended first)
+- `hminima_watershed` (if over-segmented)
+- `combined_markers` (robust fallback)
 
 ## Tests
 

@@ -121,13 +121,28 @@ def _load_overlay_images(output_dir: Path, limit: int = 8) -> list:
 
 def _load_summary_tables(
     output_dir: Path,
-) -> tuple[pd.DataFrame, pd.DataFrame, list]:
+) -> tuple[pd.DataFrame, pd.DataFrame, list, list]:
+    """加载结果表格、叠加图和统计图表"""
     results_path = output_dir / "csv" / "results.csv"
     summary_path = output_dir / "csv" / "summary.csv"
     results = pd.read_csv(results_path) if results_path.is_file() else pd.DataFrame()
     summary = pd.read_csv(summary_path) if summary_path.is_file() else pd.DataFrame()
     overlays = _load_overlay_images(output_dir, limit=8)
-    return results, summary, overlays
+    
+    # 加载统计图表
+    plots_dir = output_dir / "plots"
+    plot_images = []
+    if plots_dir.is_dir():
+        plot_files = sorted(plots_dir.glob("*.png"))
+        for p in plot_files[:6]:  # 最多加载6张图
+            try:
+                from PIL import Image
+                img = Image.open(p).convert("RGB")
+                plot_images.append(np.asarray(img))
+            except Exception:
+                continue
+    
+    return results, summary, overlays, plot_images
 
 
 def run_from_ui(
@@ -153,7 +168,7 @@ def run_from_ui(
     cellpose_flow_threshold: float = 0.4,
     cellpose_cellprob_threshold: float = 0.0,
     progress=None,
-) -> tuple[str, Any, Any, list[str]]:
+) -> tuple[str, Any, Any, list[str], list[str]]:
     """从 Web 界面执行完整分析流程。"""
     logs: list[str] = []
 
@@ -161,6 +176,7 @@ def run_from_ui(
         logs.append(msg)
 
     empty_df = pd.DataFrame()
+    empty_gallery = []
     in_path = Path(input_dir.strip().strip('"').strip("'")) if input_dir else None
     if not in_path or not in_path.is_dir():
         return (
@@ -169,7 +185,8 @@ def run_from_ui(
             "该目录下可以是「每个视野一个子文件夹」，程序会递归找到里面的 TIF。",
             empty_df,
             empty_df,
-            [],
+            empty_gallery,
+            empty_gallery,
         )
 
     if output_dir and str(output_dir).strip():
@@ -206,7 +223,7 @@ def run_from_ui(
     try:
         cfg = load_config(cfg_file, overrides=overrides)
     except Exception as exc:
-        return f"❌ **参数配置无效**：{exc}", empty_df, empty_df, []
+        return f"❌ **参数配置无效**：{exc}", empty_df, empty_df, empty_gallery, empty_gallery
 
     if cfg.segmentation_method == "cellpose":
         st = cellpose_status()
@@ -218,7 +235,8 @@ def run_from_ui(
                 "或把「细胞分割方法」改回 **Otsu 阈值法（默认）**，无需额外安装即可分析。",
                 empty_df,
                 empty_df,
-                [],
+                empty_gallery,
+                empty_gallery,
             )
         _log(f"Cellpose 状态：{st['message']}")
 
@@ -240,7 +258,7 @@ def run_from_ui(
         results_path = run_pipeline(
             in_path.resolve(), out_path.resolve(), cfg, progress=on_progress
         )
-        results_df, summary_df, overlays = _load_summary_tables(out_path.resolve())
+        results_df, summary_df, overlays, plot_images = _load_summary_tables(out_path.resolve())
 
         n_rows = len(results_df)
         n_pass = 0
@@ -277,6 +295,7 @@ def run_from_ui(
             f"- `csv/summary.csv`：按 实验/药物/组别 汇总\n"
             f"- `csv/graphpad_MC.csv`：可直接导入 GraphPad 的宽表\n"
             f"- `overlays/`：叠加图（绿=细胞轮廓，红=膜环，蓝=胞质）\n"
+            f"- `plots/`：📊 统计图表（M/C对比、箱线图、质控统计等）\n"
             f"- `masks/`：标签图；`qc/`：被剔除细胞的原因记录\n\n"
             f"### 运行日志（末尾）\n```\n" + "\n".join(logs[-80:]) + "\n```"
         )
@@ -286,6 +305,7 @@ def run_from_ui(
             _df_for_gradio(results_df, 300),
             _df_for_gradio(summary_df, 100),
             overlays,
+            plot_images,
         )
     except Exception as exc:
         tb = traceback.format_exc()
@@ -294,7 +314,8 @@ def run_from_ui(
             f"```\n{tb}\n```",
             empty_df,
             empty_df,
-            [],
+            empty_gallery,
+            empty_gallery,
         )
 
 
@@ -378,23 +399,49 @@ def build_app(config_path: Path | None = None):
 ### ② 细胞分割（如何认出每个细胞）
 
 程序需要先把每个细胞从背景里分出来，得到「全细胞轮廓」。  
-**默认推荐 Otsu**；只有在细胞粘连多、阈值效果差时，再考虑安装并使用 Cellpose。
+
+**🎯 针对细胞粘连问题，现提供多种方案：**
+
+1. **Otsu 阈值法**（默认）- 简单快速，适合分离良好的细胞
+2. **距离变换+分水岭** - ImageJ经典方法，适合圆形粘连细胞
+3. **梯度+分水岭** - 利用边界强度分割
+4. **H-minima+分水岭** - 文献推荐，适合密集细胞（抑制过度分割）
+5. **形态学开运算** - 通过腐蚀膨胀断开细窄连接
+6. **距离+梯度双重markers** - 综合方法，效果更稳定
+
+💡 **粘连严重时建议**：先试 **距离变换分水岭**，效果不好再试 **H-minima分水岭** 或 **双重markers**
 """
                 )
-                seg_method = gr.Radio(
+                seg_method = gr.Dropdown(
                     choices=[
                         ("Otsu 阈值法（默认，推荐先用这个）", "otsu"),
+                        ("距离变换+分水岭（适合圆形粘连细胞）", "watershed_distance"),
+                        ("梯度+分水岭（适合边界清晰的细胞）", "watershed_gradient"),
+                        ("H-minima+分水岭（适合密集粘连细胞）", "hminima_watershed"),
+                        ("形态学开运算（适合轻度粘连）", "morphological_opening"),
+                        ("距离+梯度双重markers（综合方法）", "combined_markers"),
                         ("Cellpose 深度学习（需额外安装）", "cellpose"),
                     ],
                     value=(
                         cfg.segmentation_method
-                        if cfg.segmentation_method in ("otsu", "cellpose")
+                        if cfg.segmentation_method in (
+                            "otsu", "cellpose", "watershed_distance", 
+                            "watershed_gradient", "hminima_watershed",
+                            "morphological_opening", "combined_markers"
+                        )
                         else "otsu"
                     ),
                     label="细胞分割方法",
                     info=(
-                        "• Otsu：根据绿色荧光亮度自动定阈值，再做形态学清理，无需安装额外包，速度快。\n"
-                        "• Cellpose：用深度学习找细胞，对不规则/粘连细胞往往更好，但需 pip install cellpose，首次会下载模型、较慢。"
+                        "🔬 **针对粘连细胞的多种分割方案**（参考ImageJ和文献方法）：\n\n"
+                        "• **Otsu 阈值法**：简单快速，适合分离良好的细胞\n"
+                        "• **距离变换+分水岭**：经典方法，适合圆形/椭圆形粘连细胞（ImageJ Watershed插件原理）\n"
+                        "• **梯度+分水岭**：利用边界强度，适合边界清晰但粘连的细胞\n"
+                        "• **H-minima+分水岭**：文献常用，抑制过度分割，适合密集培养细胞\n"
+                        "• **形态学开运算**：通过腐蚀-膨胀断开细窄连接，适合轻度粘连\n"
+                        "• **距离+梯度双重markers**：综合方法，结合中心和边界信息\n"
+                        "• **Cellpose**：深度学习（需 pip install cellpose），最强但最慢\n\n"
+                        "💡 **建议**：粘连严重时依次尝试：距离变换分水岭 → H-minima分水岭 → 双重markers"
                     ),
                 )
                 with gr.Accordion("Cellpose 专用选项（仅在上面选了 Cellpose 时生效）", open=False):
@@ -598,6 +645,11 @@ def build_app(config_path: Path | None = None):
                     columns=2,
                     height=420,
                 )
+                plots_gallery = gr.Gallery(
+                    label="📊 统计图表（M/C对比、箱线图、质控统计、相关性等）",
+                    columns=2,
+                    height=500,
+                )
                 gr.Markdown(
                     """
 #### 结果怎么看？
@@ -636,7 +688,7 @@ def build_app(config_path: Path | None = None):
                 cellpose_flow_threshold,
                 cellpose_cellprob_threshold,
             ],
-            outputs=[report, results_table, summary_table, gallery],
+            outputs=[report, results_table, summary_table, gallery, plots_gallery],
         )
 
     return demo

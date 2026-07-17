@@ -165,10 +165,20 @@ def run_pipeline(
     df = rows_to_dataframe(all_rows)
     results_path = out_dirs["csv"] / "results.csv"
     write_results_csv(df, results_path)
-    write_summary_csv(df, out_dirs["csv"] / "summary.csv")
+    summary_df = write_summary_csv(df, out_dirs["csv"] / "summary.csv")
 
     if cfg.save_graphpad:
         write_graphpad_csv(df, out_dirs["csv"] / "graphpad_MC.csv")
+
+    # 生成统计图表
+    _progress("Generating plots…", 0.97)
+    try:
+        from .plots import generate_all_plots
+        generate_all_plots(df, summary_df, output_dir)
+        logger.info("Statistical plots generated in plots/")
+    except Exception as e:
+        logger.warning("Failed to generate plots: %s", e)
+        logger.debug(traceback.format_exc())
 
     n_pass = int((df["QC"] == "pass").sum()) if not df.empty else 0
     logger.info("Done. %d cell rows (%d pass QC). Results: %s", len(df), n_pass, results_path)

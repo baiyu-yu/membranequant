@@ -6,8 +6,18 @@ Design principle:
   - DiI is used only later for QC (red coverage), not for defining ROIs.
 
 Segmentation backends:
-  - otsu     : classical threshold pipeline (default, no extra deps)
-  - cellpose : optional deep-learning path (pip install cellpose)
+  - otsu                    : 经典Otsu阈值 (default, no extra deps)
+  - watershed_distance      : 距离变换+分水岭 (适合圆形粘连细胞)
+  - watershed_gradient      : 梯度+分水岭 (适合边界清晰的细胞)
+  - hminima_watershed       : H-minima+分水岭 (适合密集粘连细胞)
+  - morphological_opening   : 形态学开运算 (适合轻度粘连)
+  - combined_markers        : 距离+梯度双重markers (综合方法)
+  - cellpose                : 深度学习 (需安装cellpose)
+  
+For severely adhered cells, try:
+  1. watershed_distance (ImageJ经典方法)
+  2. hminima_watershed (抑制过度分割)
+  3. combined_markers (综合效果最稳定)
 """
 
 from __future__ import annotations
@@ -155,6 +165,242 @@ def segment_whole_cells_otsu(
     return _filter_labeled_cells(labels_raw, green, cfg, clear_border_cells=True)
 
 
+def segment_whole_cells_watershed_distance(
+    green: np.ndarray,
+    red: np.ndarray,
+    cfg: Config,
+) -> tuple[np.ndarray, list[dict]]:
+    """Distance-transform watershed: 距离变换+分水岭（经典方法，适合圆形/椭圆粘连细胞）
+    
+    Reference: 
+    - ImageJ Watershed Plugin
+    - OpenCV Tutorial: Watershed segmentation
+    - 基于距离变换的分水岭算法常用于粘连物体分割
+    
+    步骤：
+    1. 二值化获取前景
+    2. 距离变换得到每个像素到边界的距离
+    3. 在距离变换的局部最大值处作为种子点（细胞中心）
+    4. 分水岭算法从种子扩展分割
+    """
+    from skimage.feature import peak_local_max
+    from skimage.segmentation import watershed
+    from scipy import ndimage as ndi
+    
+    seg_img = _segmentation_image(green, red, cfg.segmentation_channel)
+    
+    # 二值化
+    if cfg.threshold == "otsu":
+        thr = threshold_otsu(seg_img)
+    else:
+        thr = float(cfg.threshold)
+    
+    binary = seg_img > thr
+    binary = closing(binary, disk(3))
+    binary = remove_small_objects(binary, max_size=max(1, cfg.minimum_cell_area // 4))
+    binary = ndi.binary_fill_holes(binary)
+    
+    # 距离变换
+    distance = ndi.distance_transform_edt(binary)
+    
+    # 寻找局部最大值作为种子点（细胞中心）
+    # min_distance参数控制两个峰值之间的最小距离，可以根据细胞大小调整
+    min_distance = max(5, int(np.sqrt(cfg.minimum_cell_area / np.pi) * 0.5))
+    coords = peak_local_max(distance, min_distance=min_distance, labels=binary)
+    
+    # 创建markers
+    mask = np.zeros(distance.shape, dtype=bool)
+    mask[tuple(coords.T)] = True
+    markers = label(mask)
+    
+    # 分水岭分割
+    labels_raw = watershed(-distance, markers, mask=binary)
+    
+    return _filter_labeled_cells(labels_raw, green, cfg, clear_border_cells=True)
+
+
+def segment_whole_cells_watershed_gradient(
+    green: np.ndarray,
+    red: np.ndarray,
+    cfg: Config,
+) -> tuple[np.ndarray, list[dict]]:
+    """Gradient-based watershed: 基于梯度的分水岭（适合边界清晰的细胞）
+    
+    Reference:
+    - ImageJ Morphological Segmentation Plugin
+    - Marker-controlled watershed for cell segmentation
+    
+    步骤：
+    1. 计算图像梯度（边界强度）
+    2. 使用形态学操作找到内部markers（确定的细胞中心）
+    3. 使用分水岭算法基于梯度图分割
+    """
+    from skimage.filters import sobel
+    from skimage.segmentation import watershed
+    from skimage.morphology import opening
+    
+    seg_img = _segmentation_image(green, red, cfg.segmentation_channel)
+    
+    # 计算梯度
+    edges = sobel(seg_img)
+    
+    # 二值化获取粗略前景
+    if cfg.threshold == "otsu":
+        thr = threshold_otsu(seg_img)
+    else:
+        thr = float(cfg.threshold)
+    
+    binary = seg_img > thr
+    binary = closing(binary, disk(3))
+    binary = remove_small_objects(binary, max_size=max(1, cfg.minimum_cell_area // 4))
+    
+    # 获取确定的内部区域作为markers（通过opening操作缩小）
+    markers = opening(binary, disk(5))
+    markers = label(markers)
+    
+    # 基于梯度的分水岭
+    labels_raw = watershed(edges, markers, mask=binary)
+    
+    return _filter_labeled_cells(labels_raw, green, cfg, clear_border_cells=True)
+
+
+def segment_whole_cells_hminima_watershed(
+    green: np.ndarray,
+    red: np.ndarray,
+    cfg: Config,
+) -> tuple[np.ndarray, list[dict]]:
+    """H-minima + Watershed: 抑制浅局部极小值的分水岭（文献中常用于密集细胞）
+    
+    Reference:
+    - "Iterative h-minima-based marker-controlled watershed for cell nucleus segmentation"
+    - "Marker-controlled watershed with deep edge emphasis and optimized H-minima transform"
+    
+    H-minima变换可以抑制深度小于h的局部极小值，减少过度分割。
+    适合密集培养的细胞核或细胞分割。
+    """
+    from skimage.morphology import h_minima, reconstruction
+    from skimage.segmentation import watershed
+    
+    seg_img = _segmentation_image(green, red, cfg.segmentation_channel)
+    
+    # 二值化
+    if cfg.threshold == "otsu":
+        thr = threshold_otsu(seg_img)
+    else:
+        thr = float(cfg.threshold)
+    
+    binary = seg_img > thr
+    binary = closing(binary, disk(3))
+    binary = remove_small_objects(binary, max_size=max(1, cfg.minimum_cell_area // 4))
+    binary = ndi.binary_fill_holes(binary)
+    
+    # 距离变换
+    distance = ndi.distance_transform_edt(binary)
+    
+    # H-minima变换抑制浅的局部极小值
+    # h值可调：较大的h会产生更少的marker（更少的细胞），适合抑制噪声
+    h_value = distance.max() * 0.3  # 可以调整这个比例
+    h_min = h_minima(distance, h=h_value)
+    
+    # 找到markers（extended minima）
+    markers = label(h_min)
+    
+    # 分水岭
+    labels_raw = watershed(-distance, markers, mask=binary)
+    
+    return _filter_labeled_cells(labels_raw, green, cfg, clear_border_cells=True)
+
+
+def segment_whole_cells_morphological_opening(
+    green: np.ndarray,
+    red: np.ndarray,
+    cfg: Config,
+) -> tuple[np.ndarray, list[dict]]:
+    """Morphological Opening: 形态学开运算分离（简单直接，适合轻度粘连）
+    
+    Reference:
+    - ImageJ Process > Binary > Watershed
+    - Opening操作可以断开细胞间的细窄连接
+    
+    原理：开运算(Opening) = 先腐蚀再膨胀
+    - 腐蚀可以断开粘连点
+    - 膨胀恢复细胞大小
+    适合粘连不严重、有明显细窄连接的情况
+    """
+    from skimage.morphology import opening
+    
+    seg_img = _segmentation_image(green, red, cfg.segmentation_channel)
+    
+    # 二值化
+    if cfg.threshold == "otsu":
+        thr = threshold_otsu(seg_img)
+    else:
+        thr = float(cfg.threshold)
+    
+    binary = seg_img > thr
+    
+    # 使用较大的结构元素进行开运算，断开粘连
+    # disk大小可以根据粘连程度调整
+    selem = disk(4)  # 可调
+    binary = opening(binary, selem)
+    
+    binary = remove_small_objects(binary, max_size=max(1, cfg.minimum_cell_area // 4))
+    binary = ndi.binary_fill_holes(binary)
+    
+    labels_raw = label(binary)
+    return _filter_labeled_cells(labels_raw, green, cfg, clear_border_cells=True)
+
+
+def segment_whole_cells_combined_markers(
+    green: np.ndarray,
+    red: np.ndarray,
+    cfg: Config,
+) -> tuple[np.ndarray, list[dict]]:
+    """Combined markers watershed: 结合距离变换和梯度的双重markers
+    
+    这是一个改进方法，结合了：
+    - 距离变换识别细胞中心
+    - 梯度图识别细胞边界
+    适合复杂场景的粘连分割
+    """
+    from skimage.feature import peak_local_max
+    from skimage.filters import sobel
+    from skimage.segmentation import watershed
+    
+    seg_img = _segmentation_image(green, red, cfg.segmentation_channel)
+    
+    # 二值化
+    if cfg.threshold == "otsu":
+        thr = threshold_otsu(seg_img)
+    else:
+        thr = float(cfg.threshold)
+    
+    binary = seg_img > thr
+    binary = closing(binary, disk(3))
+    binary = remove_small_objects(binary, max_size=max(1, cfg.minimum_cell_area // 4))
+    binary = ndi.binary_fill_holes(binary)
+    
+    # 距离变换找中心
+    distance = ndi.distance_transform_edt(binary)
+    min_distance = max(5, int(np.sqrt(cfg.minimum_cell_area / np.pi) * 0.5))
+    coords = peak_local_max(distance, min_distance=min_distance, labels=binary)
+    
+    mask = np.zeros(distance.shape, dtype=bool)
+    mask[tuple(coords.T)] = True
+    markers = label(mask)
+    
+    # 梯度图
+    gradient = sobel(seg_img)
+    
+    # 结合距离和梯度：在梯度图上进行分水岭，使用距离变换的markers
+    # 这样既利用了细胞中心信息，又考虑了边界清晰度
+    combined = gradient - distance * 0.1  # 权衡梯度和距离
+    
+    labels_raw = watershed(combined, markers, mask=binary)
+    
+    return _filter_labeled_cells(labels_raw, green, cfg, clear_border_cells=True)
+
+
 def _to_cellpose_input(image: np.ndarray) -> np.ndarray:
     """Convert float [0,1] image to uint16 range Cellpose handles well."""
     img = np.asarray(image, dtype=np.float32)
@@ -220,13 +466,39 @@ def segment_whole_cells(
     red: np.ndarray,
     cfg: Config,
 ) -> tuple[np.ndarray, list[dict]]:
-    """Dispatch to otsu or cellpose backend."""
+    """Dispatch to different segmentation backends.
+    
+    Available methods:
+    - otsu: 经典Otsu阈值法（默认）
+    - watershed_distance: 距离变换+分水岭（适合圆形粘连细胞）
+    - watershed_gradient: 基于梯度的分水岭（适合边界清晰的细胞）
+    - hminima_watershed: H-minima抑制+分水岭（适合密集细胞）
+    - morphological_opening: 形态学开运算（适合轻度粘连）
+    - combined_markers: 结合距离和梯度的双重markers
+    - cellpose: 深度学习分割（需要安装cellpose）
+    """
     method = (cfg.segmentation_method or "otsu").strip().lower()
+    
     if method == "cellpose":
         return segment_whole_cells_cellpose(green, red, cfg)
-    if method == "otsu":
+    elif method == "otsu":
         return segment_whole_cells_otsu(green, red, cfg)
-    raise ValueError(f"Unknown segmentation_method: {method}")
+    elif method == "watershed_distance":
+        return segment_whole_cells_watershed_distance(green, red, cfg)
+    elif method == "watershed_gradient":
+        return segment_whole_cells_watershed_gradient(green, red, cfg)
+    elif method == "hminima_watershed":
+        return segment_whole_cells_hminima_watershed(green, red, cfg)
+    elif method == "morphological_opening":
+        return segment_whole_cells_morphological_opening(green, red, cfg)
+    elif method == "combined_markers":
+        return segment_whole_cells_combined_markers(green, red, cfg)
+    else:
+        raise ValueError(
+            f"Unknown segmentation_method: {method}. "
+            f"Available: otsu, watershed_distance, watershed_gradient, "
+            f"hminima_watershed, morphological_opening, combined_markers, cellpose"
+        )
 
 
 # Back-compat alias used by older tests / imports
