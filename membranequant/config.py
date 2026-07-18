@@ -46,7 +46,7 @@ class Config:
     save_overlay: bool = True
     save_mask: bool = True
     save_graphpad: bool = True
-    compute_pearson: bool = False
+    compute_pearson: bool = True
     output_dir: str = "Results"
 
     def to_dict(self) -> dict[str, Any]:

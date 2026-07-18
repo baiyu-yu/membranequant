@@ -134,7 +134,7 @@ def _load_summary_tables(
     plot_images = []
     if plots_dir.is_dir():
         plot_files = sorted(plots_dir.glob("*.png"))
-        for p in plot_files[:6]:  # 最多加载6张图
+        for p in plot_files[:12]:  # 最多加载12张图（含多指标/共定位）
             try:
                 from PIL import Image
                 img = Image.open(p).convert("RGB")
@@ -314,12 +314,13 @@ def run_from_ui(
             f"| 输出文件夹 | `{out_path.resolve()}` |\n"
             f"{warn_qc}\n"
             f"**输出说明：**\n"
-            f"- `csv/results.csv`：每个细胞的详细测量（含 M/C 膜/质比）\n"
-            f"- `csv/summary.csv`：按 实验/药物/组别 汇总\n"
-            f"- `csv/graphpad_MC.csv`：可直接导入 GraphPad 的宽表\n"
-            f"- `overlays/`：叠加图（绿=细胞轮廓，红=膜环，蓝=胞质）\n"
-            f"- `plots/`：📊 统计图表（M/C对比、箱线图、质控统计等）\n"
-            f"- `masks/`：标签图；`qc/`：被剔除细胞的原因记录\n\n"
+            f"- `csv/results.csv`：单细胞明细（**M/C_DiI、MEI、Manders_M1** 等）\n"
+            f"- `csv/summary.csv`：按条件汇总（默认主指标 **M/C_DiI**）\n"
+            f"- `csv/graphpad_*.csv`：GraphPad 宽表（多指标）\n"
+            f"- `overlays/`：分割叠加图 + 红绿共定位散点图\n"
+            f"- `plots/`：📊 **300 dpi 统计图（可直接放 PPT）**\n"
+            f"- `masks/`：标签图；`qc/`：剔除原因\n\n"
+            f"💡 也可用可视化前端：`python membranequant/visualizer_app.py` 上传 results.csv 出图。\n\n"
             f"### 运行日志（末尾）\n```\n" + "\n".join(logs[-80:]) + "\n```"
         )
         # Gradio: return limited dataframes + in-memory images (not Chinese file paths)
@@ -641,13 +642,16 @@ def build_app(config_path: Path | None = None):
                 gr.Markdown(
                     """
 ---
-**主指标速查**
+**主指标速查（膜定位 / 共定位）**
 
-| 名称 | 含义 |
-|------|------|
-| **M/C** | 膜环绿色均值 ÷ 胞质绿色均值（膜定位越高通常越大） |
-| **MembraneFraction** | 膜环绿色积分 ÷ 全细胞绿色积分 |
-| **Red Coverage** | 膜环上 DiI 覆盖比例（质控，不是主生物学指标） |
+| 名称 | 含义 | 用途 |
+|------|------|------|
+| **M/C_DiI** | DiI 引导膜上绿均值 ÷ 胞质绿均值 | **推荐主指标** |
+| **MEI** | (膜−质)/(膜+质)，∈(−1,1) | 稳健富集指数 |
+| **Manders_M1** | Costes 阈值下绿与 DiI 共现比例 | 标准共定位 |
+| **EdgeCenterRatio** | 几何边缘/中心绿强度比 | DiI 不均时备份 |
+| M/C / MembraneFraction | 固定几何膜环 | 传统/对照 |
+| **Red Coverage** | 膜环 DiI 覆盖率 | **仅质控** |
 """
                 )
 

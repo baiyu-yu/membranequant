@@ -76,6 +76,11 @@ def test_end_to_end_synthetic():
     assert len(rows) >= 1
     assert "M/C" in rows[0]
     assert rows[0]["MembranePixels"] > 0
+    # New colocalization / enrichment metrics
+    assert "M/C_DiI" in rows[0]
+    assert "MEI" in rows[0]
+    assert "Manders_M1" in rows[0]
+    assert "PearsonWhole" in rows[0]
 
 
 def test_pipeline_on_disk(tmp_path: Path):

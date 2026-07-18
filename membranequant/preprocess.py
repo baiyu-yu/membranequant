@@ -49,9 +49,14 @@ def correct_background(image: np.ndarray, radius: int = 50) -> np.ndarray:
 
     corrected = img - bg
     corrected = np.clip(corrected, 0.0, None)
-    # Re-normalize to [0, 1] after subtraction for stable downstream thresholds
+    # Keep relative intensities after background subtraction.
+    # Per-image max-renormalization used to hide real intensity differences
+    # across fields and can flatten group trends in enrichment metrics.
+    # Downstream thresholds (Otsu/Costes) work on relative scales within ROI.
     maxv = float(corrected.max())
-    if maxv > 0:
+    if maxv > 1.0:
+        # Only scale down if still above unit range (safety for float pipelines
+        # that already live in [0,1]); never stretch dim images up to 1.0.
         corrected = corrected / maxv
     return corrected.astype(np.float32, copy=False)
 

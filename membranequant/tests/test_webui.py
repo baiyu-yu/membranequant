@@ -35,7 +35,7 @@ def test_preview_and_run(tmp_path: Path):
     assert "配对" in preview or "视野" in preview
 
     out = tmp_path / "Results"
-    report, results_df, summary_df, overlays = run_from_ui(
+    report, results_df, summary_df, overlays, plots = run_from_ui(
         input_dir=str(exp),
         output_dir=str(out),
         seg_method="otsu",
@@ -60,6 +60,7 @@ def test_preview_and_run(tmp_path: Path):
     assert "完成" in report or "分析" in report
     assert results_df is not None
     assert (out / "csv" / "results.csv").is_file()
+    assert (out / "plots").is_dir()
 
 
 def test_run_cellpose_without_install_errors_gracefully(tmp_path: Path):

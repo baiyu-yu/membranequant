@@ -34,7 +34,7 @@ minimum_red_coverage: 0.5
 save_overlay: true
 save_mask: true
 save_graphpad: true
-compute_pearson: false
+compute_pearson: true
 
 # Output relative to selected experiment root (or --output)
 output_dir: Results

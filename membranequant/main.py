@@ -34,7 +34,8 @@ from membranequant.config import load_config, Config
 from membranequant.export import (
     rows_to_dataframe,
     save_label_mask,
-    write_graphpad_csv,
+    write_all_graphpad,
+    write_multi_metric_summary,
     write_qc_log,
     write_results_csv,
     write_summary_csv,
@@ -45,7 +46,7 @@ from membranequant.preprocess import preprocess_pair
 from membranequant.qc import apply_qc
 from membranequant.segmentation import build_cell_masks, cellpose_status
 from membranequant.utils import ensure_dir, setup_logging
-from membranequant.visualization import draw_overlay
+from membranequant.visualization import draw_overlay, save_coloc_scatter
 
 ProgressCallback = Callable[[str, float], None]
 
@@ -91,6 +92,13 @@ def process_field(
             masks.cytoplasm,
             out_dirs["overlays"] / f"{safe_name}_overlay.png",
             title=pair.image_id,
+        )
+        save_coloc_scatter(
+            green_p,
+            red_p,
+            masks.labels,
+            out_dirs["overlays"] / f"{safe_name}_coloc_scatter.png",
+            title=f"{pair.image_id} EGFP vs DiI",
         )
 
     write_qc_log(
@@ -165,12 +173,16 @@ def run_pipeline(
     df = rows_to_dataframe(all_rows)
     results_path = out_dirs["csv"] / "results.csv"
     write_results_csv(df, results_path)
-    summary_df = write_summary_csv(df, out_dirs["csv"] / "summary.csv")
+    # Primary summary uses DiI-guided M/C (recommended for membrane localization)
+    summary_df = write_summary_csv(df, out_dirs["csv"] / "summary.csv", metric="M/C_DiI")
+    write_summary_csv(df, out_dirs["csv"] / "summary_Manders_M1.csv", metric="Manders_M1")
+    write_summary_csv(df, out_dirs["csv"] / "summary_MEI.csv", metric="MEI")
+    write_multi_metric_summary(df, out_dirs["csv"] / "summary_all_metrics.csv")
 
     if cfg.save_graphpad:
-        write_graphpad_csv(df, out_dirs["csv"] / "graphpad_MC.csv")
+        write_all_graphpad(df, out_dirs["csv"])
 
-    # 生成统计图表
+    # 生成统计图表（PPT 级 300 dpi PNG）
     _progress("Generating plots…", 0.97)
     try:
         from .plots import generate_all_plots

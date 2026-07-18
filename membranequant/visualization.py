@@ -80,7 +80,8 @@ def draw_overlay(
         )
 
     fig.tight_layout(pad=0.1)
-    fig.savefig(path, bbox_inches="tight", pad_inches=0.05)
+    # 300 dpi for direct PPT insertion
+    fig.savefig(path, bbox_inches="tight", pad_inches=0.05, dpi=300)
     plt.close(fig)
 
 
@@ -102,5 +103,38 @@ def save_debug_panel(
     for ax in axes:
         ax.set_axis_off()
     fig.tight_layout()
-    fig.savefig(path, bbox_inches="tight")
+    fig.savefig(path, bbox_inches="tight", dpi=300)
+    plt.close(fig)
+
+
+def save_coloc_scatter(
+    green: np.ndarray,
+    red: np.ndarray,
+    labels: np.ndarray,
+    path: Path,
+    title: str = "",
+    max_points: int = 8000,
+) -> None:
+    """Per-field green vs red scatter (Coloc2-style fluorogram) for PPT QC."""
+    ensure_dir(path.parent)
+    mask = labels > 0
+    if not np.any(mask):
+        return
+    g = green[mask].ravel()
+    r = red[mask].ravel()
+    if g.size > max_points:
+        rng = np.random.default_rng(0)
+        idx = rng.choice(g.size, size=max_points, replace=False)
+        g, r = g[idx], r[idx]
+
+    fig, ax = plt.subplots(figsize=(5.5, 5.5), dpi=150)
+    ax.scatter(r, g, s=2, alpha=0.25, c="0.2", edgecolors="none")
+    ax.set_xlabel("DiI (Red)", fontweight="bold")
+    ax.set_ylabel("EGFP (Green)", fontweight="bold")
+    ax.set_title(title or "Colocalization scatter", fontsize=11, fontweight="bold")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight", dpi=300)
     plt.close(fig)

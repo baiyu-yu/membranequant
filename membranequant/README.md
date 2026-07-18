@@ -148,9 +148,19 @@ Results/
   logs/
 ```
 
-Main metric: **M/C** = Membrane Green Mean / Cytoplasm Green Mean.
+### Metrics (what to report)
 
-Also: MembraneFraction, RedCoverage (QC).
+| Metric | Meaning | Use |
+|--------|---------|-----|
+| **M/C_DiI** | Mean green on DiI-guided membrane / mean green in cytoplasm | **Primary** membrane localization |
+| **MEI** | (I_mem − I_cyto) / (I_mem + I_cyto) ∈ (−1, 1) | Robust enrichment index |
+| **Manders_M1** | Fraction of green co-occurring with DiI (Costes thr.) | Classic colocalization (Coloc2-style) |
+| **EdgeCenterRatio** | Outer-shell / inner-core green mean | Backup when DiI is uneven |
+| M/C, MembraneFraction | Geometric ring only | Traditional / QC |
+| PearsonWhole | Pixel correlation green↔red | Pattern correlation (noise-sensitive) |
+| RedCoverage | DiI coverage of geometric ring | **QC only**, not biology |
+
+Pipeline: background correction → cell segmentation (EGFP) → geometric membrane ring + **DiI-guided membrane mask** → enrichment + Manders/Pearson → QC → CSV + `plots/` (300 dpi).
 
 ## Config
 

@@ -1,10 +1,10 @@
-"""数据可视化和统计图表生成模块
+"""数据可视化和统计图表生成模块（PPT 级 300 dpi PNG）
 
-生成各种统计图表用于展示膜定位分析结果：
-- 分组M/C比较（柱状图、箱线图、散点图）
-- 质控统计图
-- 分割方法对比
-- 相关性分析
+生成膜定位 / 共定位分析结果图：
+- 分组柱状图、箱线图+蜂群、小提琴图
+- 多指标并排对比
+- 质控统计、相关性热图
+- 膜 vs 胞质散点、共定位指标分布
 """
 
 from __future__ import annotations
@@ -23,76 +23,186 @@ import seaborn as sns
 from .utils import ensure_dir
 
 # 设置中文字体和样式
-plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
-plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams["font.sans-serif"] = [
+    "Microsoft YaHei",
+    "SimHei",
+    "Arial Unicode MS",
+    "DejaVu Sans",
+]
+plt.rcParams["axes.unicode_minus"] = False
 sns.set_style("whitegrid")
 sns.set_palette("husl")
+
+PPT_DPI = 300
+
+METRIC_LABELS = {
+    "M/C_DiI": "M/C (DiI引导膜/质比)",
+    "MEI": "膜富集指数 MEI",
+    "Manders_M1": "Manders M1 (绿∩红)",
+    "Manders_M2": "Manders M2 (红∩绿)",
+    "EdgeCenterRatio": "边缘/中心强度比",
+    "M/C": "M/C (几何膜环)",
+    "MembraneFraction": "膜荧光占比",
+    "MembraneFraction_DiI": "DiI膜荧光占比",
+    "PearsonWhole": "Pearson r (全细胞)",
+    "PearsonMem": "Pearson r (膜环)",
+    "PearsonDiI": "Pearson r (DiI膜)",
+    "RedCoverage": "DiI覆盖率",
+}
+
+
+def _pass_df(results_df: pd.DataFrame) -> pd.DataFrame:
+    if results_df is None or results_df.empty:
+        return pd.DataFrame()
+    df = results_df.copy()
+    df = df.replace([np.inf, -np.inf], np.nan)
+    if "QC" in df.columns:
+        passed = df[df["QC"] == "pass"].copy()
+        if not passed.empty:
+            return passed
+    return df
+
+
+def _ensure_condition(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "Condition" not in out.columns or out["Condition"].isna().all():
+        for alt in ("Group", "Drug", "Experiment"):
+            if alt in out.columns and out[alt].notna().any():
+                out["Condition"] = out[alt].astype(str)
+                break
+        else:
+            out["Condition"] = "All"
+    out["Condition"] = out["Condition"].astype(str)
+    return out
+
+
+def _empty_fig(output_path: Path, msg: str = "无数据") -> None:
+    ensure_dir(output_path.parent)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.text(0.5, 0.5, msg, ha="center", va="center", fontsize=16)
+    ax.set_axis_off()
+    fig.savefig(output_path, dpi=PPT_DPI, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_mc_comparison_bar(
     summary_df: pd.DataFrame,
     output_path: Path,
-    title: str = "膜定位指数(M/C)对比",
+    title: str = "膜定位指数对比",
+    ylabel: str | None = None,
 ) -> None:
-    """柱状图对比各组的M/C均值，带误差线（SEM）
-    
-    Args:
-        summary_df: 汇总数据，需包含 Condition, Mean_M/C, SEM 列
-        output_path: 输出图片路径
-        title: 图表标题
-    """
+    """柱状图对比各组均值，带 SEM 误差线。"""
     ensure_dir(output_path.parent)
-    
-    if summary_df.empty or "Mean_M/C" not in summary_df.columns:
-        # 创建空白图表
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.text(0.5, 0.5, "无数据", ha='center', va='center', fontsize=16)
-        ax.set_axis_off()
-        fig.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
+
+    if summary_df is None or summary_df.empty:
+        _empty_fig(output_path)
         return
-    
+
     df = summary_df.copy()
+    mean_col = "Mean_M/C" if "Mean_M/C" in df.columns else ("Mean" if "Mean" in df.columns else None)
+    if mean_col is None:
+        _empty_fig(output_path, "无均值列")
+        return
+
     if "Condition" not in df.columns or df["Condition"].isna().all():
         df["Condition"] = df.get("Group", "Unknown")
-    
-    fig, ax = plt.subplots(figsize=(max(8, len(df) * 0.8), 6))
-    
+
+    fig, ax = plt.subplots(figsize=(max(8, len(df) * 0.9), 6))
+
     x = np.arange(len(df))
-    means = df["Mean_M/C"].values
-    sems = df["SEM"].values if "SEM" in df.columns else np.zeros_like(means)
-    
-    bars = ax.bar(x, means, yerr=sems, capsize=5, alpha=0.8, 
-                   edgecolor='black', linewidth=1.5)
-    
-    # 颜色渐变
-    colors = sns.color_palette("husl", len(df))
+    means = df[mean_col].values.astype(float)
+    sems = df["SEM"].values.astype(float) if "SEM" in df.columns else np.zeros_like(means)
+
+    bars = ax.bar(
+        x, means, yerr=sems, capsize=5, alpha=0.85, edgecolor="black", linewidth=1.5
+    )
+    colors = sns.color_palette("Set2", len(df))
     for bar, color in zip(bars, colors):
         bar.set_color(color)
-    
-    ax.set_xlabel("组别", fontsize=12, fontweight='bold')
-    ax.set_ylabel("M/C (膜/胞质荧光比)", fontsize=12, fontweight='bold')
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+
+    ax.set_xlabel("组别", fontsize=12, fontweight="bold")
+    ax.set_ylabel(ylabel or "指标均值 ± SEM", fontsize=12, fontweight="bold")
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=20)
     ax.set_xticks(x)
-    ax.set_xticklabels(df["Condition"], rotation=45, ha='right')
-    
-    # 添加数值标签
+    ax.set_xticklabels(df["Condition"].astype(str), rotation=45, ha="right")
+
+    y_top = float(np.nanmax(means + sems)) if len(means) else 1.0
     for i, (mean, sem) in enumerate(zip(means, sems)):
-        ax.text(i, mean + sem + 0.05, f'{mean:.2f}', 
-                ha='center', va='bottom', fontsize=9, fontweight='bold')
-    
-    # 添加细胞数标注
+        ax.text(
+            i,
+            mean + sem + max(0.02 * y_top, 0.02),
+            f"{mean:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+        )
+
     if "N_Cells" in df.columns:
         for i, n in enumerate(df["N_Cells"]):
-            ax.text(i, 0.05, f'n={n}', 
-                    ha='center', va='bottom', fontsize=8, style='italic')
-    
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.grid(axis='y', alpha=0.3)
-    
+            ax.text(i, 0.0, f"n={int(n)}", ha="center", va="bottom", fontsize=8, style="italic")
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300, bbox_inches='tight')
+    fig.savefig(output_path, dpi=PPT_DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_metric_boxplot(
+    results_df: pd.DataFrame,
+    output_path: Path,
+    metric: str = "M/C_DiI",
+    title: str | None = None,
+) -> None:
+    """箱线图 + 单细胞散点。"""
+    ensure_dir(output_path.parent)
+    df = _ensure_condition(_pass_df(results_df))
+    if df.empty or metric not in df.columns:
+        _empty_fig(output_path, f"无指标 {metric}")
+        return
+
+    df = df.dropna(subset=[metric])
+    if df.empty:
+        _empty_fig(output_path, "无有效数值")
+        return
+
+    conditions = list(df["Condition"].unique())
+    fig, ax = plt.subplots(figsize=(max(8, len(conditions) * 1.2), 6))
+
+    data = [df[df["Condition"] == c][metric].values for c in conditions]
+    bp = ax.boxplot(
+        data,
+        tick_labels=conditions,
+        patch_artist=True,
+        showmeans=True,
+        meanprops=dict(marker="D", markerfacecolor="red", markersize=6),
+        boxprops=dict(facecolor="lightblue", alpha=0.65),
+        medianprops=dict(color="darkblue", linewidth=2),
+        whiskerprops=dict(linewidth=1.5),
+        capprops=dict(linewidth=1.5),
+    )
+    colors = sns.color_palette("Set2", len(conditions))
+    for patch, color in zip(bp["boxes"], colors):
+        patch.set_facecolor(color)
+
+    rng = np.random.default_rng(42)
+    for i, condition in enumerate(conditions, 1):
+        y = df[df["Condition"] == condition][metric].values
+        x = rng.normal(i, 0.06, size=len(y))
+        ax.scatter(x, y, alpha=0.45, s=22, color="0.3", edgecolors="white", linewidth=0.4, zorder=3)
+
+    label = METRIC_LABELS.get(metric, metric)
+    ax.set_xlabel("组别", fontsize=12, fontweight="bold")
+    ax.set_ylabel(label, fontsize=12, fontweight="bold")
+    ax.set_title(title or f"{label} 分布", fontsize=14, fontweight="bold", pad=20)
+    ax.tick_params(axis="x", rotation=45)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=PPT_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -101,68 +211,130 @@ def plot_mc_boxplot(
     output_path: Path,
     title: str = "膜定位指数(M/C)分布",
 ) -> None:
-    """箱线图展示各组M/C分布，叠加散点显示单细胞数据
-    
-    Args:
-        results_df: 单细胞结果数据
-        output_path: 输出图片路径
-        title: 图表标题
-    """
+    """兼容旧接口：优先 M/C_DiI，否则 M/C。"""
+    df = results_df if results_df is not None else pd.DataFrame()
+    metric = "M/C_DiI" if "M/C_DiI" in df.columns else "M/C"
+    # 允许调用方把任意指标拷到 M/C 列
+    if "M/C" in df.columns and title and "M/C" not in title:
+        metric = "M/C"
+    plot_metric_boxplot(df, output_path, metric=metric if metric in df.columns else "M/C", title=title)
+
+
+def plot_metric_violin(
+    results_df: pd.DataFrame,
+    output_path: Path,
+    metric: str = "M/C_DiI",
+    title: str | None = None,
+) -> None:
+    """小提琴图（发表常用）。"""
     ensure_dir(output_path.parent)
-    
-    if results_df.empty or "M/C" not in results_df.columns:
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.text(0.5, 0.5, "无数据", ha='center', va='center', fontsize=16)
-        ax.set_axis_off()
-        fig.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
+    df = _ensure_condition(_pass_df(results_df))
+    if df.empty or metric not in df.columns:
+        _empty_fig(output_path, f"无指标 {metric}")
         return
-    
-    df = results_df[results_df["QC"] == "pass"].copy() if "QC" in results_df.columns else results_df.copy()
-    
+    df = df.dropna(subset=[metric])
     if df.empty:
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.text(0.5, 0.5, "无通过QC的细胞", ha='center', va='center', fontsize=16)
-        ax.set_axis_off()
-        fig.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
+        _empty_fig(output_path)
         return
-    
-    if "Condition" not in df.columns or df["Condition"].isna().all():
-        df["Condition"] = df.get("Group", "Unknown")
-    
-    fig, ax = plt.subplots(figsize=(max(8, len(df["Condition"].unique()) * 1.2), 6))
-    
-    # 箱线图
-    bp = ax.boxplot(
-        [df[df["Condition"] == c]["M/C"].values for c in df["Condition"].unique()],
-        labels=df["Condition"].unique(),
-        patch_artist=True,
-        showmeans=True,
-        meanprops=dict(marker='D', markerfacecolor='red', markersize=6),
-        boxprops=dict(facecolor='lightblue', alpha=0.6),
-        medianprops=dict(color='darkblue', linewidth=2),
-        whiskerprops=dict(linewidth=1.5),
-        capprops=dict(linewidth=1.5),
+
+    fig, ax = plt.subplots(figsize=(max(8, df["Condition"].nunique() * 1.2), 6))
+    sns.violinplot(
+        data=df,
+        x="Condition",
+        y=metric,
+        hue="Condition",
+        inner="quartile",
+        cut=0,
+        ax=ax,
+        palette="Set2",
+        legend=False,
     )
-    
-    # 叠加散点
-    for i, condition in enumerate(df["Condition"].unique(), 1):
-        y = df[df["Condition"] == condition]["M/C"].values
-        x = np.random.normal(i, 0.04, size=len(y))
-        ax.scatter(x, y, alpha=0.4, s=20, color='gray', edgecolors='black', linewidth=0.5)
-    
-    ax.set_xlabel("组别", fontsize=12, fontweight='bold')
-    ax.set_ylabel("M/C (膜/胞质荧光比)", fontsize=12, fontweight='bold')
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
-    ax.tick_params(axis='x', rotation=45)
-    
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.grid(axis='y', alpha=0.3)
-    
+    sns.stripplot(
+        data=df,
+        x="Condition",
+        y=metric,
+        color="0.25",
+        alpha=0.35,
+        size=3,
+        ax=ax,
+    )
+    label = METRIC_LABELS.get(metric, metric)
+    ax.set_xlabel("组别", fontsize=12, fontweight="bold")
+    ax.set_ylabel(label, fontsize=12, fontweight="bold")
+    ax.set_title(title or f"{label} 小提琴图", fontsize=14, fontweight="bold", pad=15)
+    ax.tick_params(axis="x", rotation=45)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300, bbox_inches='tight')
+    fig.savefig(output_path, dpi=PPT_DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_multi_metric_bars(
+    results_df: pd.DataFrame,
+    output_path: Path,
+    metrics: list[str] | None = None,
+) -> None:
+    """多指标均值 ± SEM 分组柱状图（一张图看趋势是否一致）。"""
+    ensure_dir(output_path.parent)
+    df = _ensure_condition(_pass_df(results_df))
+    metrics = metrics or ["M/C_DiI", "MEI", "Manders_M1", "EdgeCenterRatio", "PearsonWhole"]
+    metrics = [m for m in metrics if m in df.columns]
+    if df.empty or not metrics:
+        _empty_fig(output_path, "无可用指标")
+        return
+
+    rows = []
+    for m in metrics:
+        for cond, sub in df.groupby("Condition"):
+            vals = sub[m].dropna()
+            if vals.empty:
+                continue
+            n = len(vals)
+            mean = float(vals.mean())
+            sem = float(vals.std(ddof=1) / np.sqrt(n)) if n > 1 else 0.0
+            rows.append({"Condition": cond, "Metric": METRIC_LABELS.get(m, m), "Mean": mean, "SEM": sem, "N": n})
+    plot_df = pd.DataFrame(rows)
+    if plot_df.empty:
+        _empty_fig(output_path)
+        return
+
+    fig, ax = plt.subplots(figsize=(max(10, len(metrics) * 1.8), 6))
+    sns.barplot(
+        data=plot_df,
+        x="Metric",
+        y="Mean",
+        hue="Condition",
+        errorbar=None,
+        ax=ax,
+        palette="Set2",
+        edgecolor="black",
+        linewidth=0.8,
+    )
+    # Manual SEM error bars
+    conditions = list(plot_df["Condition"].unique())
+    metric_labels = list(plot_df["Metric"].unique())
+    n_hue = len(conditions)
+    width = 0.8 / max(n_hue, 1)
+    for i, met in enumerate(metric_labels):
+        for j, cond in enumerate(conditions):
+            row = plot_df[(plot_df["Metric"] == met) & (plot_df["Condition"] == cond)]
+            if row.empty:
+                continue
+            mean = float(row["Mean"].iloc[0])
+            sem = float(row["SEM"].iloc[0])
+            x = i - 0.4 + width / 2 + j * width
+            ax.errorbar(x, mean, yerr=sem, fmt="none", ecolor="black", capsize=3, linewidth=1)
+
+    ax.set_xlabel("分析指标", fontsize=12, fontweight="bold")
+    ax.set_ylabel("均值 ± SEM", fontsize=12, fontweight="bold")
+    ax.set_title("多指标膜定位/共定位趋势对比", fontsize=14, fontweight="bold", pad=15)
+    ax.tick_params(axis="x", rotation=25)
+    ax.legend(title="组别", frameon=True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=PPT_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -170,42 +342,49 @@ def plot_qc_statistics(
     results_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
-    """质控统计图：通过率和失败原因分布
-    
-    Args:
-        results_df: 单细胞结果数据
-        output_path: 输出图片路径
-    """
+    """质控统计图：通过率和失败原因分布。"""
     ensure_dir(output_path.parent)
-    
-    if results_df.empty or "QC" not in results_df.columns:
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.text(0.5, 0.5, "无QC数据", ha='center', va='center', fontsize=16)
-        ax.set_axis_off()
-        fig.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
+
+    if results_df is None or results_df.empty or "QC" not in results_df.columns:
+        _empty_fig(output_path, "无QC数据")
         return
-    
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # 左图：通过率饼图
+
     qc_counts = results_df["QC"].value_counts()
-    colors = ['#66c2a5', '#fc8d62']
-    explode = (0.05, 0)
-    
-    ax1.pie(qc_counts.values, labels=['通过', '失败'], autopct='%1.1f%%',
-            startangle=90, colors=colors, explode=explode,
-            textprops={'fontsize': 12, 'fontweight': 'bold'})
-    ax1.set_title(f"质控通过率\n总计 {len(results_df)} 个细胞", 
-                  fontsize=13, fontweight='bold', pad=15)
-    
-    # 右图：失败原因柱状图
+    labels = []
+    values = []
+    for key, lab in [("pass", "通过"), ("fail", "失败")]:
+        if key in qc_counts.index:
+            labels.append(lab)
+            values.append(int(qc_counts[key]))
+    # Include any other QC labels
+    for key in qc_counts.index:
+        if key not in ("pass", "fail"):
+            labels.append(str(key))
+            values.append(int(qc_counts[key]))
+
+    if values:
+        colors = sns.color_palette("Set2", len(values))
+        ax1.pie(
+            values,
+            labels=labels,
+            autopct="%1.1f%%",
+            startangle=90,
+            colors=colors,
+            textprops={"fontsize": 12, "fontweight": "bold"},
+        )
+    ax1.set_title(
+        f"质控通过率\n总计 {len(results_df)} 个细胞",
+        fontsize=13,
+        fontweight="bold",
+        pad=15,
+    )
+
     if "QC_Reason" in results_df.columns:
         failed = results_df[results_df["QC"] == "fail"]
         if not failed.empty and failed["QC_Reason"].notna().any():
             reasons = failed["QC_Reason"].value_counts().head(8)
-            
-            # 中文化原因
             reason_map = {
                 "area_too_small": "面积过小",
                 "area_too_large": "面积过大",
@@ -214,35 +393,36 @@ def plot_qc_statistics(
                 "green_saturation": "绿色饱和",
                 "red_coverage": "红色覆盖不足",
                 "membrane_pixels": "膜环像素不足",
+                "membrane_pixels_low": "膜环像素不足",
             }
             reasons.index = [reason_map.get(r, r) for r in reasons.index]
-            
-            bars = ax2.barh(range(len(reasons)), reasons.values, color='coral', 
-                            alpha=0.8, edgecolor='black', linewidth=1)
+            ax2.barh(
+                range(len(reasons)),
+                reasons.values,
+                color="coral",
+                alpha=0.85,
+                edgecolor="black",
+                linewidth=1,
+            )
             ax2.set_yticks(range(len(reasons)))
             ax2.set_yticklabels(reasons.index, fontsize=10)
-            ax2.set_xlabel("细胞数", fontsize=11, fontweight='bold')
-            ax2.set_title("质控失败原因", fontsize=13, fontweight='bold', pad=15)
+            ax2.set_xlabel("细胞数", fontsize=11, fontweight="bold")
+            ax2.set_title("质控失败原因", fontsize=13, fontweight="bold", pad=15)
             ax2.invert_yaxis()
-            
-            # 添加数值标签
             for i, v in enumerate(reasons.values):
-                ax2.text(v + 0.5, i, str(v), va='center', fontsize=9, fontweight='bold')
-            
-            ax2.spines['top'].set_visible(False)
-            ax2.spines['right'].set_visible(False)
-            ax2.grid(axis='x', alpha=0.3)
+                ax2.text(v + 0.5, i, str(v), va="center", fontsize=9, fontweight="bold")
+            ax2.spines["top"].set_visible(False)
+            ax2.spines["right"].set_visible(False)
+            ax2.grid(axis="x", alpha=0.3)
         else:
-            ax2.text(0.5, 0.5, "无失败细胞", ha='center', va='center', 
-                     fontsize=14, transform=ax2.transAxes)
+            ax2.text(0.5, 0.5, "无失败细胞", ha="center", va="center", fontsize=14, transform=ax2.transAxes)
             ax2.set_axis_off()
     else:
-        ax2.text(0.5, 0.5, "无QC_Reason数据", ha='center', va='center', 
-                 fontsize=14, transform=ax2.transAxes)
+        ax2.text(0.5, 0.5, "无QC_Reason数据", ha="center", va="center", fontsize=14, transform=ax2.transAxes)
         ax2.set_axis_off()
-    
+
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300, bbox_inches='tight')
+    fig.savefig(output_path, dpi=PPT_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -250,79 +430,58 @@ def plot_correlation_heatmap(
     results_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
-    """相关性热图：M/C, MembraneFraction, RedCoverage等指标的相关性
-    
-    Args:
-        results_df: 单细胞结果数据
-        output_path: 输出图片路径
-    """
+    """指标相关性热图。"""
     ensure_dir(output_path.parent)
-    
-    df = results_df[results_df["QC"] == "pass"].copy() if "QC" in results_df.columns else results_df.copy()
-    
+    df = _pass_df(results_df)
     if df.empty:
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.text(0.5, 0.5, "无数据", ha='center', va='center', fontsize=16)
-        ax.set_axis_off()
-        fig.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
+        _empty_fig(output_path)
         return
-    
-    # 选择数值列
+
     numeric_cols = [
-        "M/C", "MembraneFraction", "RedCoverage", "Area",
-        "MembraneGreen", "CytoGreen", "MembraneRed"
+        "M/C_DiI",
+        "MEI",
+        "Manders_M1",
+        "EdgeCenterRatio",
+        "M/C",
+        "MembraneFraction",
+        "PearsonWhole",
+        "RedCoverage",
+        "Area",
+        "MembraneGreen_DiI",
+        "CytoGreen_DiI",
     ]
     available_cols = [col for col in numeric_cols if col in df.columns]
-    
     if len(available_cols) < 2:
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.text(0.5, 0.5, "数值列不足", ha='center', va='center', fontsize=16)
-        ax.set_axis_off()
-        fig.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
+        _empty_fig(output_path, "数值列不足")
         return
-    
-    # 计算相关性
+
     corr = df[available_cols].corr()
-    
-    # 中文标签
-    label_map = {
-        "M/C": "M/C比",
-        "MembraneFraction": "膜占比",
-        "RedCoverage": "红色覆盖",
-        "Area": "面积",
-        "MembraneGreen": "膜绿色",
-        "CytoGreen": "胞质绿色",
-        "MembraneRed": "膜红色",
-    }
-    labels = [label_map.get(col, col) for col in available_cols]
-    
-    fig, ax = plt.subplots(figsize=(10, 8))
-    
-    im = ax.imshow(corr, cmap='coolwarm', aspect='auto', vmin=-1, vmax=1)
-    
-    # 添加colorbar
+    labels = [METRIC_LABELS.get(col, col) for col in available_cols]
+
+    fig, ax = plt.subplots(figsize=(11, 9))
+    im = ax.imshow(corr, cmap="coolwarm", aspect="auto", vmin=-1, vmax=1)
     cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("相关系数", fontsize=11, fontweight='bold')
-    
-    # 设置刻度
+    cbar.set_label("相关系数", fontsize=11, fontweight="bold")
     ax.set_xticks(range(len(labels)))
     ax.set_yticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=10)
-    ax.set_yticklabels(labels, fontsize=10)
-    
-    # 添加数值
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=9)
+    ax.set_yticklabels(labels, fontsize=9)
     for i in range(len(labels)):
         for j in range(len(labels)):
-            text = ax.text(j, i, f'{corr.iloc[i, j]:.2f}',
-                          ha="center", va="center", color="black" if abs(corr.iloc[i, j]) < 0.5 else "white",
-                          fontsize=9, fontweight='bold')
-    
-    ax.set_title("指标相关性热图", fontsize=14, fontweight='bold', pad=20)
-    
+            val = corr.iloc[i, j]
+            ax.text(
+                j,
+                i,
+                f"{val:.2f}",
+                ha="center",
+                va="center",
+                color="black" if abs(val) < 0.55 else "white",
+                fontsize=8,
+                fontweight="bold",
+            )
+    ax.set_title("指标相关性热图", fontsize=14, fontweight="bold", pad=20)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300, bbox_inches='tight')
+    fig.savefig(output_path, dpi=PPT_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -330,54 +489,43 @@ def plot_scatter_membrane_vs_cyto(
     results_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
-    """散点图：膜绿色 vs 胞质绿色，按组着色
-    
-    Args:
-        results_df: 单细胞结果数据
-        output_path: 输出图片路径
-    """
+    """散点图：膜绿色 vs 胞质绿色（优先 DiI 引导）。"""
     ensure_dir(output_path.parent)
-    
-    df = results_df[results_df["QC"] == "pass"].copy() if "QC" in results_df.columns else results_df.copy()
-    
-    if df.empty or "MembraneGreen" not in df.columns or "CytoGreen" not in df.columns:
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.text(0.5, 0.5, "无数据", ha='center', va='center', fontsize=16)
-        ax.set_axis_off()
-        fig.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
+    df = _ensure_condition(_pass_df(results_df))
+
+    xcol = "CytoGreen_DiI" if "CytoGreen_DiI" in df.columns else "CytoGreen"
+    ycol = "MembraneGreen_DiI" if "MembraneGreen_DiI" in df.columns else "MembraneGreen"
+    if df.empty or xcol not in df.columns or ycol not in df.columns:
+        _empty_fig(output_path)
         return
-    
-    if "Condition" not in df.columns or df["Condition"].isna().all():
-        df["Condition"] = "All"
-    
+
     fig, ax = plt.subplots(figsize=(10, 8))
-    
-    conditions = df["Condition"].unique()
-    colors = sns.color_palette("husl", len(conditions))
-    
+    conditions = list(df["Condition"].unique())
+    colors = sns.color_palette("Set2", len(conditions))
     for condition, color in zip(conditions, colors):
         mask = df["Condition"] == condition
-        ax.scatter(df.loc[mask, "CytoGreen"], 
-                  df.loc[mask, "MembraneGreen"],
-                  label=condition, alpha=0.6, s=40, color=color,
-                  edgecolors='black', linewidth=0.5)
-    
-    # 对角线 (M/C = 1)
-    max_val = max(df["CytoGreen"].max(), df["MembraneGreen"].max())
-    ax.plot([0, max_val], [0, max_val], 'k--', alpha=0.3, linewidth=2, label='M/C=1')
-    
-    ax.set_xlabel("胞质绿色荧光强度", fontsize=12, fontweight='bold')
-    ax.set_ylabel("膜绿色荧光强度", fontsize=12, fontweight='bold')
-    ax.set_title("膜 vs 胞质荧光强度散点图", fontsize=14, fontweight='bold', pad=20)
-    ax.legend(loc='best', frameon=True, shadow=True)
-    
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+        ax.scatter(
+            df.loc[mask, xcol],
+            df.loc[mask, ycol],
+            label=condition,
+            alpha=0.65,
+            s=40,
+            color=color,
+            edgecolors="black",
+            linewidth=0.4,
+        )
+
+    max_val = max(float(df[xcol].max()), float(df[ycol].max()), 1e-6)
+    ax.plot([0, max_val], [0, max_val], "k--", alpha=0.35, linewidth=2, label="M/C=1")
+    ax.set_xlabel("胞质绿色荧光强度", fontsize=12, fontweight="bold")
+    ax.set_ylabel("膜绿色荧光强度", fontsize=12, fontweight="bold")
+    ax.set_title("膜 vs 胞质荧光强度（对角线以上 = 膜富集）", fontsize=14, fontweight="bold", pad=20)
+    ax.legend(loc="best", frameon=True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     ax.grid(alpha=0.3)
-    
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300, bbox_inches='tight')
+    fig.savefig(output_path, dpi=PPT_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -385,103 +533,171 @@ def plot_area_distribution(
     results_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
-    """细胞面积分布直方图，按组分面板
-    
-    Args:
-        results_df: 单细胞结果数据
-        output_path: 输出图片路径
-    """
+    """细胞面积分布直方图。"""
     ensure_dir(output_path.parent)
-    
-    df = results_df[results_df["QC"] == "pass"].copy() if "QC" in results_df.columns else results_df.copy()
-    
+    df = _ensure_condition(_pass_df(results_df))
     if df.empty or "Area" not in df.columns:
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.text(0.5, 0.5, "无数据", ha='center', va='center', fontsize=16)
-        ax.set_axis_off()
-        fig.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
+        _empty_fig(output_path)
         return
-    
-    if "Condition" not in df.columns or df["Condition"].isna().all():
-        df["Condition"] = "All"
-    
-    conditions = df["Condition"].unique()
+
+    conditions = list(df["Condition"].unique())
     n_conditions = len(conditions)
-    
-    fig, axes = plt.subplots(1, min(n_conditions, 4), figsize=(min(n_conditions * 4, 16), 4))
-    if n_conditions == 1:
+    n_show = min(n_conditions, 4)
+    fig, axes = plt.subplots(1, n_show, figsize=(min(n_show * 4, 16), 4))
+    if n_show == 1:
         axes = [axes]
-    
-    for i, (condition, ax) in enumerate(zip(conditions[:4], axes)):
+
+    for i, (condition, ax) in enumerate(zip(conditions[:n_show], axes)):
         data = df[df["Condition"] == condition]["Area"].values
-        ax.hist(data, bins=30, color=sns.color_palette("husl", n_conditions)[i], 
-                alpha=0.7, edgecolor='black')
-        ax.axvline(data.mean(), color='red', linestyle='--', linewidth=2, label=f'均值: {data.mean():.0f}')
-        ax.set_xlabel("面积 (像素)", fontsize=10, fontweight='bold')
-        ax.set_ylabel("细胞数", fontsize=10, fontweight='bold')
-        ax.set_title(f"{condition}\nn={len(data)}", fontsize=11, fontweight='bold')
+        ax.hist(
+            data,
+            bins=30,
+            color=sns.color_palette("Set2", n_conditions)[i],
+            alpha=0.75,
+            edgecolor="black",
+        )
+        ax.axvline(data.mean(), color="red", linestyle="--", linewidth=2, label=f"均值: {data.mean():.0f}")
+        ax.set_xlabel("面积 (像素)", fontsize=10, fontweight="bold")
+        ax.set_ylabel("细胞数", fontsize=10, fontweight="bold")
+        ax.set_title(f"{condition}\nn={len(data)}", fontsize=11, fontweight="bold")
         ax.legend(fontsize=8)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-    
-    fig.suptitle("细胞面积分布", fontsize=14, fontweight='bold', y=1.02)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    fig.suptitle("细胞面积分布", fontsize=14, fontweight="bold", y=1.02)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300, bbox_inches='tight')
+    fig.savefig(output_path, dpi=PPT_DPI, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_coloc_dashboard(
+    results_df: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    """共定位三联图：Manders M1 / Pearson / MEI。"""
+    ensure_dir(output_path.parent)
+    df = _ensure_condition(_pass_df(results_df))
+    metrics = [m for m in ("Manders_M1", "PearsonWhole", "MEI") if m in df.columns]
+    if df.empty or not metrics:
+        _empty_fig(output_path, "无共定位指标")
+        return
+
+    fig, axes = plt.subplots(1, len(metrics), figsize=(5 * len(metrics), 5))
+    if len(metrics) == 1:
+        axes = [axes]
+
+    for ax, metric in zip(axes, metrics):
+        sns.boxplot(
+            data=df.dropna(subset=[metric]),
+            x="Condition",
+            y=metric,
+            hue="Condition",
+            ax=ax,
+            palette="Set2",
+            showfliers=False,
+            legend=False,
+        )
+        sns.stripplot(
+            data=df.dropna(subset=[metric]),
+            x="Condition",
+            y=metric,
+            ax=ax,
+            color="0.25",
+            alpha=0.4,
+            size=3,
+        )
+        ax.set_title(METRIC_LABELS.get(metric, metric), fontsize=12, fontweight="bold")
+        ax.set_xlabel("")
+        ax.set_ylabel(metric)
+        ax.tick_params(axis="x", rotation=40)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    fig.suptitle("共定位 / 膜富集指标面板（PPT可用）", fontsize=14, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=PPT_DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
+def build_summary_from_results(
+    results_df: pd.DataFrame,
+    metric: str = "M/C_DiI",
+    group_col: str = "Condition",
+    filter_qc: bool = True,
+) -> pd.DataFrame:
+    """从 results.csv 构建 summary（可视化前端用）。"""
+    df = results_df.copy().replace([np.inf, -np.inf], np.nan)
+    if filter_qc and "QC" in df.columns:
+        df = df[df["QC"] == "pass"]
+    if group_col not in df.columns:
+        df = _ensure_condition(df)
+        group_col = "Condition"
+    if metric not in df.columns:
+        for fallback in ("M/C_DiI", "M/C", "Manders_M1", "MEI"):
+            if fallback in df.columns:
+                metric = fallback
+                break
+    rows = []
+    for g, sub in df.groupby(group_col):
+        vals = sub[metric].dropna() if metric in sub.columns else pd.Series(dtype=float)
+        if vals.empty:
+            continue
+        n = int(vals.count())
+        mean = float(vals.mean())
+        sd = float(vals.std(ddof=1)) if n > 1 else 0.0
+        sem = sd / np.sqrt(n) if n > 1 else 0.0
+        rows.append(
+            {
+                "Condition": str(g),
+                "Mean_M/C": mean,
+                "Mean": mean,
+                "SD": sd,
+                "SEM": sem,
+                "N_Cells": n,
+                "Metric": metric,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def generate_all_plots(
     results_df: pd.DataFrame,
     summary_df: pd.DataFrame,
     output_dir: Path,
-) -> None:
-    """生成所有统计图表
-    
-    Args:
-        results_df: 单细胞结果数据
-        summary_df: 汇总数据
-        output_dir: 输出目录
-    """
-    plots_dir = output_dir / "plots"
-    ensure_dir(plots_dir)
-    
-    print("📊 生成统计图表...")
-    
-    try:
-        plot_mc_comparison_bar(summary_df, plots_dir / "01_mc_comparison_bar.png")
-        print("  ✅ M/C对比柱状图")
-    except Exception as e:
-        print(f"  ⚠️ M/C柱状图生成失败: {e}")
-    
-    try:
-        plot_mc_boxplot(results_df, plots_dir / "02_mc_boxplot.png")
-        print("  ✅ M/C箱线图")
-    except Exception as e:
-        print(f"  ⚠️ M/C箱线图生成失败: {e}")
-    
-    try:
-        plot_qc_statistics(results_df, plots_dir / "03_qc_statistics.png")
-        print("  ✅ 质控统计图")
-    except Exception as e:
-        print(f"  ⚠️ 质控统计图生成失败: {e}")
-    
-    try:
-        plot_correlation_heatmap(results_df, plots_dir / "04_correlation_heatmap.png")
-        print("  ✅ 相关性热图")
-    except Exception as e:
-        print(f"  ⚠️ 相关性热图生成失败: {e}")
-    
-    try:
-        plot_scatter_membrane_vs_cyto(results_df, plots_dir / "05_membrane_vs_cyto_scatter.png")
-        print("  ✅ 膜-胞质散点图")
-    except Exception as e:
-        print(f"  ⚠️ 散点图生成失败: {e}")
-    
-    try:
-        plot_area_distribution(results_df, plots_dir / "06_area_distribution.png")
-        print("  ✅ 面积分布图")
-    except Exception as e:
-        print(f"  ⚠️ 面积分布图生成失败: {e}")
-    
+    metric: str = "M/C_DiI",
+) -> list[Path]:
+    """生成所有统计图表，返回生成的文件路径列表。"""
+    plots_dir = ensure_dir(Path(output_dir) / "plots")
+    saved: list[Path] = []
+
+    # If summary empty or wrong metric, rebuild
+    if summary_df is None or summary_df.empty or "Mean_M/C" not in summary_df.columns:
+        summary_df = build_summary_from_results(results_df, metric=metric)
+
+    jobs: list[tuple[str, Any]] = [
+        ("01_metric_bar.png", lambda p: plot_mc_comparison_bar(
+            summary_df, p, title=f"{METRIC_LABELS.get(metric, metric)} 组间比较", ylabel=METRIC_LABELS.get(metric, metric)
+        )),
+        ("02_metric_boxplot.png", lambda p: plot_metric_boxplot(results_df, p, metric=metric)),
+        ("03_qc_statistics.png", lambda p: plot_qc_statistics(results_df, p)),
+        ("04_correlation_heatmap.png", lambda p: plot_correlation_heatmap(results_df, p)),
+        ("05_membrane_vs_cyto_scatter.png", lambda p: plot_scatter_membrane_vs_cyto(results_df, p)),
+        ("06_area_distribution.png", lambda p: plot_area_distribution(results_df, p)),
+        ("07_multi_metric_bars.png", lambda p: plot_multi_metric_bars(results_df, p)),
+        ("08_coloc_dashboard.png", lambda p: plot_coloc_dashboard(results_df, p)),
+        ("09_mei_violin.png", lambda p: plot_metric_violin(results_df, p, metric="MEI" if "MEI" in results_df.columns else metric)),
+        ("10_manders_boxplot.png", lambda p: plot_metric_boxplot(results_df, p, metric="Manders_M1" if "Manders_M1" in results_df.columns else metric)),
+    ]
+
+    print("📊 生成统计图表（300 dpi，可用于 PPT）...")
+    for name, fn in jobs:
+        path = plots_dir / name
+        try:
+            fn(path)
+            saved.append(path)
+            print(f"  ✅ {name}")
+        except Exception as e:
+            print(f"  ⚠️ {name} 生成失败: {e}")
+
     print(f"\n📁 所有图表已保存到: {plots_dir}")
+    return saved
