@@ -64,6 +64,7 @@ def cellpose_status() -> dict[str, Any]:
         return {
             "available": False,
             "version": None,
+            "cuda_available": False,
             "message": "Cellpose not installed. Run: pip install cellpose",
         }
     try:
@@ -72,10 +73,21 @@ def cellpose_status() -> dict[str, Any]:
         ver = getattr(cellpose, "__version__", "unknown")
     except Exception:
         ver = "unknown"
+
+    cuda_available = False
+    cuda_error = None
+    try:
+        import torch
+        cuda_available = torch.cuda.is_available()
+    except Exception as e:
+        cuda_error = str(e)
+
     return {
         "available": True,
         "version": ver,
-        "message": f"Cellpose {ver} available",
+        "cuda_available": cuda_available,
+        "cuda_error": cuda_error,
+        "message": f"Cellpose {ver} available (CUDA: {'Available' if cuda_available else 'Not Available'})",
     }
 
 
@@ -433,11 +445,20 @@ def segment_whole_cells_cellpose(
 
     # Cellpose 2.x / 3.x compatibility
     masks: np.ndarray
-    try:
-        model = models.CellposeModel(gpu=bool(cfg.cellpose_gpu), model_type=model_type)
-    except TypeError:
-        # Newer cellpose may use pretrained_model=
-        model = models.CellposeModel(gpu=bool(cfg.cellpose_gpu), pretrained_model=model_type)
+    
+    # Check if we should use Cellpose (for built-in models) or CellposeModel (for custom models/SAM)
+    builtin_models = ["cyto", "cyto2", "cyto3", "nuclei"]
+    if model_type in builtin_models:
+        try:
+            model = models.Cellpose(gpu=bool(cfg.cellpose_gpu), model_type=model_type)
+        except TypeError:
+            model = models.Cellpose(gpu=bool(cfg.cellpose_gpu), pretrained_model=model_type)
+    else:
+        try:
+            model = models.CellposeModel(gpu=bool(cfg.cellpose_gpu), model_type=model_type)
+        except TypeError:
+            # Newer cellpose may use pretrained_model=
+            model = models.CellposeModel(gpu=bool(cfg.cellpose_gpu), pretrained_model=model_type)
 
     eval_kwargs: dict[str, Any] = {
         "diameter": diameter,

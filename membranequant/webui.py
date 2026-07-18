@@ -269,7 +269,29 @@ def run_from_ui(
                 top = results_df["QC_Reason"].fillna("").value_counts().head(5)
                 qc_reasons = "\n".join(f"- `{k}`: {v} 个" for k, v in top.items() if k)
 
-        seg_cn = "Otsu 阈值" if cfg.segmentation_method == "otsu" else "Cellpose"
+        seg_names = {
+            "otsu": "Otsu 阈值法",
+            "watershed_distance": "距离变换+分水岭",
+            "watershed_gradient": "梯度+分水岭",
+            "hminima_watershed": "H-minima+分水岭",
+            "morphological_opening": "形态学开运算",
+            "combined_markers": "距离+梯度双重markers",
+            "cellpose": "Cellpose 深度学习",
+        }
+        method_name = seg_names.get(cfg.segmentation_method, cfg.segmentation_method)
+        if cfg.segmentation_method == "cellpose":
+            seg_info = f"{method_name} (模型: `{cfg.cellpose_model}`)"
+            st = cellpose_status()
+            if cfg.cellpose_gpu and st.get("cuda_available"):
+                hardware_info = "GPU (CUDA 加速)"
+            elif cfg.cellpose_gpu:
+                hardware_info = "CPU (配置了GPU，但CUDA不可用，已自动退回CPU)"
+            else:
+                hardware_info = "CPU (已禁用GPU)"
+        else:
+            seg_info = method_name
+            hardware_info = "CPU (传统方法)"
+
         warn_qc = ""
         if n_rows > 0 and n_pass == 0:
             warn_qc = (
@@ -287,7 +309,8 @@ def run_from_ui(
             f"| 结果文件 | `{results_path}` |\n"
             f"| 检出细胞数 | **{n_rows}** 行（每个细胞一行） |\n"
             f"| 通过质控 | **{n_pass}** 个细胞 |\n"
-            f"| 分割方法 | {seg_cn} (`{cfg.segmentation_method}`) |\n"
+            f"| 分割方法 | {seg_info} |\n"
+            f"| 运行硬件 | {hardware_info} |\n"
             f"| 输出文件夹 | `{out_path.resolve()}` |\n"
             f"{warn_qc}\n"
             f"**输出说明：**\n"
@@ -325,7 +348,14 @@ def build_app(config_path: Path | None = None):
     cfg = _default_cfg(config_path)
     cp = cellpose_status()
     if cp["available"]:
-        cp_banner = f"✅ **Cellpose 已安装**（{cp.get('version') or '版本未知'}），可选用深度学习分割。"
+        if cp.get("cuda_available"):
+            cuda_status = " 🚀 **(CUDA GPU加速已启用)**"
+        else:
+            cuda_status = (
+                "\n\n⚠️ **检测到 CUDA 未启用**：当前环境下的 PyTorch 未编译 GPU 支持（或者没有安装正确的 CUDA 依赖）。"
+                "运行 Cellpose 时只能以 CPU 慢速模式运行。您的电脑有显卡，请参考下方指南重新安装支持 CUDA 的 PyTorch。"
+            )
+        cp_banner = f"✅ **Cellpose 已安装**（版本: {cp.get('version') or '未知'}）{cuda_status}，可选用深度学习分割。"
     else:
         cp_banner = (
             "⚪ **Cellpose 未安装** — 默认的 Otsu 阈值分割可直接用；"
