@@ -85,9 +85,128 @@ def _empty_fig(output_path: Path, msg: str = "无数据") -> None:
     plt.close(fig)
 
 
+def _add_significance_brackets(
+    ax: plt.Axes,
+    df: pd.DataFrame,
+    metric: str,
+    conditions: list[str],
+    is_boxplot: bool = False
+) -> None:
+    """自动在图上添加显著性标识括号及 p 值符号 (*, **, ***, ns)。"""
+    import re
+    from scipy import stats
+
+    # 解析 Condition，如 104d1 -> Exp='104', Drug='d', Group='1'
+    pattern = re.compile(r"^([a-zA-Z0-9]+?)([a-zA-Z]+)([0-9]+)$")
+
+    cond_meta = {}
+    for cond in conditions:
+        subset = df[df["Condition"] == cond]
+        if not subset.empty:
+            row = subset.iloc[0]
+            exp = row.get("Experiment")
+            drug = row.get("Drug")
+            grp = row.get("Group")
+            if pd.notna(exp) and pd.notna(drug) and pd.notna(grp):
+                cond_meta[cond] = (str(exp), str(drug), str(grp))
+                continue
+        # Fallback to regex
+        m = pattern.match(cond)
+        if m:
+            cond_meta[cond] = m.groups()
+
+    # 确定需要比较的配对
+    pairs = []
+    for i, c1 in enumerate(conditions):
+        for j, c2 in enumerate(conditions):
+            if i >= j:
+                continue
+            if c1 not in cond_meta or c2 not in cond_meta:
+                continue
+            e1, d1, g1 = cond_meta[c1]
+            e2, d2, g2 = cond_meta[c2]
+
+            # 条件：必须在同一个 Experiment 内
+            if e1 != e2:
+                continue
+
+            # 配对类型 1：相同 Group，不同 Drug (如 wd1 vs we1, 104d1 vs 104e1)
+            # 配对类型 2：相同 Drug，不同 Group (如 wd1 vs wd3, wd2 vs wd3, wd1 vs wd2)
+            is_drug_comparison = (g1 == g2 and d1 != d2)
+            is_group_comparison = (d1 == d2 and g1 != g2)
+
+            if is_drug_comparison or is_group_comparison:
+                pairs.append((i, j, c1, c2))
+
+    if not pairs:
+        return
+
+    # 计算每个 x 位置的初始最高 y 值
+    x_offset = 1 if is_boxplot else 0
+
+    y_maxs = {}
+    for idx, cond in enumerate(conditions):
+        vals = df[df["Condition"] == cond][metric].dropna().values
+        if len(vals) > 0:
+            # 取 95 分位数作为图表主体的高度，防止被个别异常大值拉得太高
+            y_maxs[idx] = float(np.percentile(vals, 95))
+        else:
+            y_maxs[idx] = 1.0
+
+    # 图表整体的 y 范围
+    y_min, y_max = ax.get_ylim()
+    y_range = y_max - y_min
+    spacing = 0.06 * y_range
+    bracket_h = 0.015 * y_range
+
+    # 跟踪当前每个 x 位置的最高 y 占用
+    top_y = {idx: y_maxs[idx] for idx in range(len(conditions))}
+
+    # 对 pairs 按照 x 间距从小到大排序，这样跨度小的括号在下面，跨度大的在上面
+    pairs.sort(key=lambda p: p[1] - p[0])
+
+    for idx1, idx2, c1, c2 in pairs:
+        vals1 = df[df["Condition"] == c1][metric].dropna().values
+        vals2 = df[df["Condition"] == c2][metric].dropna().values
+        if len(vals1) < 3 or len(vals2) < 3:
+            continue
+
+        # 计算 p 值
+        _, p_val = stats.ttest_ind(vals1, vals2, equal_var=False)
+        if p_val < 0.001:
+            text = "***"
+        elif p_val < 0.01:
+            text = "**"
+        elif p_val < 0.05:
+            text = "*"
+        else:
+            text = "ns"
+
+        # 确定括号 of y 轴高度：横跨 idx1 到 idx2 之间的最大高度加上 spacing
+        span_y = [top_y[i] for i in range(idx1, idx2 + 1)]
+        y_coord = max(span_y) + spacing
+
+        # 绘制括号
+        x1 = idx1 + x_offset
+        x2 = idx2 + x_offset
+        ax.plot([x1, x1, x2, x2], [y_coord - bracket_h, y_coord, y_coord, y_coord - bracket_h], lw=1.2, c="black", zorder=5)
+
+        # 绘制文本
+        ax.text((x1 + x2) * 0.5, y_coord + 0.01 * y_range, text, ha="center", va="bottom", fontsize=9, fontweight="bold", zorder=6)
+
+        # 更新该跨度内所有 x 位置的最高 y 占用，为下一个更高的括号留出空间
+        for i in range(idx1, idx2 + 1):
+            top_y[i] = y_coord + 2 * bracket_h
+
+    # 调整 y 轴上限，防止括号超出绘图区
+    new_y_max = max(top_y.values()) + spacing
+    ax.set_ylim(y_min, new_y_max)
+
+
 def plot_mc_comparison_bar(
     summary_df: pd.DataFrame,
     output_path: Path,
+    results_df: pd.DataFrame | None = None,
     title: str = "膜定位指数对比",
     ylabel: str | None = None,
 ) -> None:
@@ -142,6 +261,15 @@ def plot_mc_comparison_bar(
         for i, n in enumerate(df["N_Cells"]):
             ax.text(i, 0.0, f"n={int(n)}", ha="center", va="bottom", fontsize=8, style="italic")
 
+    # 添加显著性标记
+    if results_df is not None:
+        metric = summary_df["Metric"].iloc[0] if "Metric" in summary_df.columns else "M/C_DiI"
+        conditions = list(df["Condition"].astype(str).values)
+        clean_results = _ensure_condition(_pass_df(results_df))
+        if "EdgeCenterRatio" in clean_results.columns:
+            clean_results = clean_results[clean_results["EdgeCenterRatio"] <= 10]
+        _add_significance_brackets(ax, clean_results, metric, conditions, is_boxplot=False)
+
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.grid(axis="y", alpha=0.3)
@@ -192,6 +320,12 @@ def plot_metric_boxplot(
         y = df[df["Condition"] == condition][metric].values
         x = rng.normal(i, 0.06, size=len(y))
         ax.scatter(x, y, alpha=0.45, s=22, color="0.3", edgecolors="white", linewidth=0.4, zorder=3)
+
+    # 添加显著性标记
+    clean_df = df.copy()
+    if "EdgeCenterRatio" in clean_df.columns:
+        clean_df = clean_df[clean_df["EdgeCenterRatio"] <= 10]
+    _add_significance_brackets(ax, clean_df, metric, conditions, is_boxplot=True)
 
     label = METRIC_LABELS.get(metric, metric)
     ax.set_xlabel("组别", fontsize=12, fontweight="bold")
@@ -258,6 +392,13 @@ def plot_metric_violin(
         size=3,
         ax=ax,
     )
+    # 添加显著性标记
+    conditions = list(df["Condition"].unique())
+    clean_df = df.copy()
+    if "EdgeCenterRatio" in clean_df.columns:
+        clean_df = clean_df[clean_df["EdgeCenterRatio"] <= 10]
+    _add_significance_brackets(ax, clean_df, metric, conditions, is_boxplot=False)
+
     label = METRIC_LABELS.get(metric, metric)
     ax.set_xlabel("组别", fontsize=12, fontweight="bold")
     ax.set_ylabel(label, fontsize=12, fontweight="bold")
@@ -676,7 +817,7 @@ def generate_all_plots(
 
     jobs: list[tuple[str, Any]] = [
         ("01_metric_bar.png", lambda p: plot_mc_comparison_bar(
-            summary_df, p, title=f"{METRIC_LABELS.get(metric, metric)} 组间比较", ylabel=METRIC_LABELS.get(metric, metric)
+            summary_df, p, results_df=results_df, title=f"{METRIC_LABELS.get(metric, metric)} 组间比较", ylabel=METRIC_LABELS.get(metric, metric)
         )),
         ("02_metric_boxplot.png", lambda p: plot_metric_boxplot(results_df, p, metric=metric)),
         ("03_qc_statistics.png", lambda p: plot_qc_statistics(results_df, p)),
@@ -687,6 +828,7 @@ def generate_all_plots(
         ("08_coloc_dashboard.png", lambda p: plot_coloc_dashboard(results_df, p)),
         ("09_mei_violin.png", lambda p: plot_metric_violin(results_df, p, metric="MEI" if "MEI" in results_df.columns else metric)),
         ("10_manders_boxplot.png", lambda p: plot_metric_boxplot(results_df, p, metric="Manders_M1" if "Manders_M1" in results_df.columns else metric)),
+        ("11_batch_effect_comparison.png", lambda p: plot_batch_effect_comparison(results_df, p, metric=metric)),
     ]
 
     print("📊 生成统计图表（300 dpi，可用于 PPT）...")
@@ -701,3 +843,135 @@ def generate_all_plots(
 
     print(f"\n📁 所有图表已保存到: {plots_dir}")
     return saved
+
+
+def plot_batch_effect_comparison(
+    results_df: pd.DataFrame,
+    output_path: Path,
+    metric: str = "M/C_DiI",
+    title: str | None = None,
+) -> None:
+    """绘制批次效应对比图（实验 104 vs 实验 w）。
+
+    自变量X轴为药物（d, e），颜色（hue）为批次（104, w）。
+    并在图上标出 104 与 w 在同种药物下的显著性差异，直观展示系统性偏差（批次效应）。
+    """
+    import numpy as np
+    import pandas as pd
+    from scipy import stats
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    ensure_dir(output_path.parent)
+    df = _ensure_condition(_pass_df(results_df))
+    if df.empty or metric not in df.columns:
+        _empty_fig(output_path, f"无指标 {metric}")
+        return
+
+    # 排除极低表达/噪点异常细胞 (EdgeCenterRatio > 10)
+    if "EdgeCenterRatio" in df.columns:
+        df = df[df["EdgeCenterRatio"] <= 10]
+
+    df = df.dropna(subset=[metric]).copy()
+    if df.empty:
+        _empty_fig(output_path, "无有效数值")
+        return
+
+    df["Exp"] = df["Experiment"].astype(str).replace({"104.0": "104", "104": "Batch 104", "w": "Batch w"})
+    df["Drug_Name"] = df["Drug"].astype(str).replace({"d": "Drug d", "e": "Drug e"})
+
+    # 仅保留主要的实验和药物组
+    plot_df = df[df["Exp"].isin(["Batch 104", "Batch w"]) & df["Drug_Name"].isin(["Drug d", "Drug e"])].copy()
+    if plot_df.empty:
+        _empty_fig(output_path, "没有匹配的批次/药物组别进行对比")
+        return
+
+    # 绘图
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # 绘制分组箱线图
+    sns.boxplot(
+        data=plot_df,
+        x="Drug_Name",
+        y=metric,
+        hue="Exp",
+        hue_order=["Batch 104", "Batch w"],
+        order=["Drug d", "Drug e"],
+        ax=ax,
+        palette="Set2",
+        width=0.6,
+        showmeans=True,
+        meanprops=dict(marker="D", markerfacecolor="red", markersize=5),
+        boxprops=dict(alpha=0.75),
+    )
+
+    # 绘制抖动单细胞散点（以和箱子对齐）
+    rng = np.random.default_rng(42)
+    positions = {
+        ("Drug d", "Batch 104"): -0.15,
+        ("Drug d", "Batch w"): 0.15,
+        ("Drug e", "Batch 104"): 0.85,
+        ("Drug e", "Batch w"): 1.15,
+    }
+
+    for (drug, exp), x_center in positions.items():
+        sub = plot_df[(plot_df["Drug_Name"] == drug) & (plot_df["Exp"] == exp)]
+        y_vals = sub[metric].values
+        if len(y_vals) > 0:
+            x_vals = rng.normal(x_center, 0.04, size=len(y_vals))
+            ax.scatter(x_vals, y_vals, alpha=0.35, s=15, color="0.3", edgecolors="white", linewidth=0.3, zorder=3)
+
+    # 统计学检验与画括号
+    y_min, y_max = ax.get_ylim()
+    y_range = y_max - y_min
+    spacing = 0.08 * y_range
+    bracket_h = 0.02 * y_range
+
+    # 测算最高高度以放置括号
+    y_limits = []
+
+    # 1. 药物 d 组比较 (Batch 104 vs Batch w)
+    vals_104_d = plot_df[(plot_df["Drug_Name"] == "Drug d") & (plot_df["Exp"] == "Batch 104")][metric].values
+    vals_w_d = plot_df[(plot_df["Drug_Name"] == "Drug d") & (plot_df["Exp"] == "Batch w")][metric].values
+    if len(vals_104_d) >= 3 and len(vals_w_d) >= 3:
+        _, p_d = stats.ttest_ind(vals_104_d, vals_w_d, equal_var=False)
+        text_d = "***" if p_d < 0.001 else ("**" if p_d < 0.01 else ("*" if p_d < 0.05 else "ns"))
+
+        # 找 95 分位数作为括号基准高
+        h_d = max(np.percentile(vals_104_d, 95), np.percentile(vals_w_d, 95))
+        y_coord_d = h_d + spacing
+
+        ax.plot([-0.15, -0.15, 0.15, 0.15], [y_coord_d - bracket_h, y_coord_d, y_coord_d, y_coord_d - bracket_h], lw=1.2, c="black", zorder=5)
+        ax.text(0.0, y_coord_d + 0.01 * y_range, f"{text_d}\n(p={p_d:.2e})", ha="center", va="bottom", fontsize=8, fontweight="bold", zorder=6)
+        y_limits.append(y_coord_d + 3 * bracket_h)
+
+    # 2. 药物 e 组比较 (Batch 104 vs Batch w)
+    vals_104_e = plot_df[(plot_df["Drug_Name"] == "Drug e") & (plot_df["Exp"] == "Batch 104")][metric].values
+    vals_w_e = plot_df[(plot_df["Drug_Name"] == "Drug e") & (plot_df["Exp"] == "Batch w")][metric].values
+    if len(vals_104_e) >= 3 and len(vals_w_e) >= 3:
+        _, p_e = stats.ttest_ind(vals_104_e, vals_w_e, equal_var=False)
+        text_e = "***" if p_e < 0.001 else ("**" if p_e < 0.01 else ("*" if p_e < 0.05 else "ns"))
+
+        h_e = max(np.percentile(vals_104_e, 95), np.percentile(vals_w_e, 95))
+        y_coord_e = h_e + spacing
+
+        ax.plot([0.85, 0.85, 1.15, 1.15], [y_coord_e - bracket_h, y_coord_e, y_coord_e, y_coord_e - bracket_h], lw=1.2, c="black", zorder=5)
+        ax.text(1.0, y_coord_e + 0.01 * y_range, f"{text_e}\n(p={p_e:.2e})", ha="center", va="bottom", fontsize=8, fontweight="bold", zorder=6)
+        y_limits.append(y_coord_e + 3 * bracket_h)
+
+    # 调整 Y 轴上限
+    if y_limits:
+        ax.set_ylim(y_min, max(y_limits) + 0.05 * y_range)
+
+    label = METRIC_LABELS.get(metric, metric)
+    ax.set_xlabel("药物处理", fontsize=12, fontweight="bold")
+    ax.set_ylabel(label, fontsize=12, fontweight="bold")
+    ax.set_title(title or f"批次效应对比图: {label} (Batch 104 vs Batch w)", fontsize=13, fontweight="bold", pad=20)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(title="实验批次", frameon=True)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=PPT_DPI, bbox_inches="tight")
+    plt.close(fig)

@@ -40,6 +40,7 @@ from membranequant.plots import (
     plot_multi_metric_bars,
     plot_qc_statistics,
     plot_scatter_membrane_vs_cyto,
+    plot_batch_effect_comparison,
 )
 
 METRIC_CHOICES = [
@@ -104,12 +105,12 @@ def process_upload(file_obj, group_col, selected_metric, filter_qc, save_dir):
     try:
         df = _load_csv(file_obj)
     except Exception as e:
-        return (None,) * 8 + (f"❌ 读取失败：{e}", None)
+        return (None,) * 9 + (f"❌ 读取失败：{e}", None)
 
     try:
         work, used_group, metric = _prepare_df(df, group_col, selected_metric, filter_qc)
     except Exception as e:
-        return (None,) * 8 + (f"❌ 数据准备失败：{e}", None)
+        return (None,) * 9 + (f"❌ 数据准备失败：{e}", None)
 
     temp_dir = Path(tempfile.gettempdir()) / "mq_plots_viz"
     if temp_dir.exists():
@@ -127,6 +128,7 @@ def process_upload(file_obj, group_col, selected_metric, filter_qc, save_dir):
         "scatter": temp_dir / "06_scatter.png",
         "qc": temp_dir / "07_qc.png",
         "heat": temp_dir / "08_heatmap.png",
+        "batch_effect": temp_dir / "11_batch_effect.png",
     }
 
     label = METRIC_LABELS.get(metric, metric)
@@ -134,6 +136,7 @@ def process_upload(file_obj, group_col, selected_metric, filter_qc, save_dir):
         plot_mc_comparison_bar(
             summary,
             paths["bar"],
+            results_df=work,
             title=f"各组 {label} 均值比较",
             ylabel=label,
         )
@@ -144,10 +147,11 @@ def process_upload(file_obj, group_col, selected_metric, filter_qc, save_dir):
         plot_scatter_membrane_vs_cyto(work, paths["scatter"])
         plot_qc_statistics(df, paths["qc"])  # QC 用全量数据
         plot_correlation_heatmap(work, paths["heat"])
+        plot_batch_effect_comparison(work, paths["batch_effect"], metric=metric, title=f"批次效应对比 ({label})")
     except Exception as e:
         import traceback
 
-        return (None,) * 8 + (f"❌ 作图失败：{e}\n\n```\n{traceback.format_exc()}\n```", None)
+        return (None,) * 9 + (f"❌ 作图失败：{e}\n\n```\n{traceback.format_exc()}\n```", None)
 
     # Optional save to user folder
     saved_note = ""
@@ -220,6 +224,7 @@ def process_upload(file_obj, group_col, selected_metric, filter_qc, save_dir):
         str(paths["scatter"]),
         str(paths["qc"]),
         str(paths["heat"]),
+        str(paths["batch_effect"]),
         "\n".join(lines),
         save_path_msg,
     )
@@ -295,6 +300,8 @@ def build_gui():
                         qc_img = gr.Image(label="QC", type="filepath")
                     with gr.Tab("相关性热图"):
                         heat_img = gr.Image(label="指标相关", type="filepath")
+                    with gr.Tab("批次效应对比"):
+                        batch_effect_img = gr.Image(label="104 vs w 批次效应", type="filepath")
 
         submit_btn.click(
             fn=process_upload,
@@ -308,6 +315,7 @@ def build_gui():
                 scatter_img,
                 qc_img,
                 heat_img,
+                batch_effect_img,
                 info_output,
                 save_status,
             ],
