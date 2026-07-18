@@ -57,9 +57,10 @@ def _pass_df(results_df: pd.DataFrame) -> pd.DataFrame:
     df = results_df.copy()
     df = df.replace([np.inf, -np.inf], np.nan)
     if "QC" in df.columns:
-        passed = df[df["QC"] == "pass"].copy()
-        if not passed.empty:
-            return passed
+        df = df[df["QC"] == "pass"].copy()
+    # 全局自动排除 EdgeCenterRatio > 10 的亮背景噪点异常细胞
+    if "EdgeCenterRatio" in df.columns:
+        df = df[df["EdgeCenterRatio"] <= 10].copy()
     return df
 
 
@@ -173,7 +174,9 @@ def _add_significance_brackets(
 
         # 计算 p 值
         _, p_val = stats.ttest_ind(vals1, vals2, equal_var=False)
-        if p_val < 0.001:
+        if p_val < 0.0001:
+            text = "****"
+        elif p_val < 0.001:
             text = "***"
         elif p_val < 0.01:
             text = "**"
@@ -770,6 +773,9 @@ def build_summary_from_results(
     df = results_df.copy().replace([np.inf, -np.inf], np.nan)
     if filter_qc and "QC" in df.columns:
         df = df[df["QC"] == "pass"]
+    # 汇总计算时同样全局自动排除 EdgeCenterRatio > 10 的噪点异常细胞，确保均值不受偏离影响
+    if filter_qc and "EdgeCenterRatio" in df.columns:
+        df = df[df["EdgeCenterRatio"] <= 10]
     if group_col not in df.columns:
         df = _ensure_condition(df)
         group_col = "Condition"
@@ -982,7 +988,9 @@ def plot_batch_effect_comparison(
             continue
 
         _, p_val = stats.ttest_ind(vals1, vals2, equal_var=False)
-        if p_val < 0.001:
+        if p_val < 0.0001:
+            text = "****"
+        elif p_val < 0.001:
             text = "***"
         elif p_val < 0.01:
             text = "**"
