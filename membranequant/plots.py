@@ -889,6 +889,9 @@ def plot_batch_effect_comparison(
     # 绘图
     fig, ax = plt.subplots(figsize=(8, 6))
 
+    # 定义高端学术色卡：Batch 104 (青绿色), Batch w (珊瑚色)
+    custom_colors = ["#4db6ac", "#ff8a65"]
+
     # 绘制分组箱线图
     sns.boxplot(
         data=plot_df,
@@ -898,14 +901,17 @@ def plot_batch_effect_comparison(
         hue_order=["Batch 104", "Batch w"],
         order=["Drug d", "Drug e"],
         ax=ax,
-        palette="Set2",
-        width=0.6,
+        palette=custom_colors,
+        width=0.55,
         showmeans=True,
-        meanprops=dict(marker="D", markerfacecolor="red", markersize=5),
-        boxprops=dict(alpha=0.75),
+        meanprops=dict(marker="D", markerfacecolor="red", markersize=4, zorder=4),
+        boxprops=dict(alpha=0.8, linewidth=1.2),
+        whiskerprops=dict(linewidth=1.2),
+        capprops=dict(linewidth=1.2),
+        medianprops=dict(linewidth=1.8, color="#222222"),
     )
 
-    # 绘制抖动单细胞散点（以和箱子对齐）
+    # 绘制抖动单细胞散点（以和箱子对齐）- 显著减弱散点视觉占比，更干净
     rng = np.random.default_rng(42)
     positions = {
         ("Drug d", "Batch 104"): -0.15,
@@ -919,58 +925,107 @@ def plot_batch_effect_comparison(
         y_vals = sub[metric].values
         if len(y_vals) > 0:
             x_vals = rng.normal(x_center, 0.04, size=len(y_vals))
-            ax.scatter(x_vals, y_vals, alpha=0.35, s=15, color="0.3", edgecolors="white", linewidth=0.3, zorder=3)
+            ax.scatter(x_vals, y_vals, alpha=0.15, s=8, color="0.3", edgecolors="none", linewidth=0, zorder=3)
 
     # 统计学检验与画括号
     y_min, y_max = ax.get_ylim()
     y_range = y_max - y_min
-    spacing = 0.08 * y_range
-    bracket_h = 0.02 * y_range
+    spacing = 0.06 * y_range
+    bracket_h = 0.015 * y_range
 
-    # 测算最高高度以放置括号
+    # 定义所有的比较对 (x1, x2, val1, val2, description)
+    comparisons = [
+        # 1. d组: Batch 104 vs Batch w
+        ((-0.15, 0.15), 
+         plot_df[(plot_df["Drug_Name"] == "Drug d") & (plot_df["Exp"] == "Batch 104")][metric].values,
+         plot_df[(plot_df["Drug_Name"] == "Drug d") & (plot_df["Exp"] == "Batch w")][metric].values,
+         "Batch 104 vs Batch w (Drug d)"),
+         
+        # 2. e组: Batch 104 vs Batch w
+        ((0.85, 1.15),
+         plot_df[(plot_df["Drug_Name"] == "Drug e") & (plot_df["Exp"] == "Batch 104")][metric].values,
+         plot_df[(plot_df["Drug_Name"] == "Drug e") & (plot_df["Exp"] == "Batch w")][metric].values,
+         "Batch 104 vs Batch w (Drug e)"),
+         
+        # 3. Batch 104: Drug d vs Drug e
+        ((-0.15, 0.85),
+         plot_df[(plot_df["Drug_Name"] == "Drug d") & (plot_df["Exp"] == "Batch 104")][metric].values,
+         plot_df[(plot_df["Drug_Name"] == "Drug e") & (plot_df["Exp"] == "Batch 104")][metric].values,
+         "Drug d vs Drug e (Batch 104)"),
+         
+        # 4. Batch w: Drug d vs Drug e (排除 wd3 异常)
+        ((0.15, 1.15),
+         plot_df[(plot_df["Drug_Name"] == "Drug d") & (plot_df["Exp"] == "Batch w") & (plot_df["Condition"] != "wd3")][metric].values,
+         plot_df[(plot_df["Drug_Name"] == "Drug e") & (plot_df["Exp"] == "Batch w")][metric].values,
+         "Drug d vs Drug e (Batch w)"),
+    ]
+
+    x_coords = [-0.15, 0.15, 0.85, 1.15]
+    y_maxs = {}
+    for idx, (drug, exp) in enumerate([
+        ("Drug d", "Batch 104"),
+        ("Drug d", "Batch w"),
+        ("Drug e", "Batch 104"),
+        ("Drug e", "Batch w")
+    ]):
+        vals = plot_df[(plot_df["Drug_Name"] == drug) & (plot_df["Exp"] == exp)][metric].dropna().values
+        y_maxs[idx] = float(np.percentile(vals, 95)) if len(vals) > 0 else 1.0
+
+    top_y = {idx: y_maxs[idx] for idx in range(4)}
+
+    # 按间距排序：横向的大括号(1.0)在上方，垂直的小括号(0.3)在下方
+    comparisons.sort(key=lambda c: c[0][1] - c[0][0])
+
     y_limits = []
+    for (x1, x2), vals1, vals2, label_text in comparisons:
+        if len(vals1) < 3 or len(vals2) < 3:
+            continue
 
-    # 1. 药物 d 组比较 (Batch 104 vs Batch w)
-    vals_104_d = plot_df[(plot_df["Drug_Name"] == "Drug d") & (plot_df["Exp"] == "Batch 104")][metric].values
-    vals_w_d = plot_df[(plot_df["Drug_Name"] == "Drug d") & (plot_df["Exp"] == "Batch w")][metric].values
-    if len(vals_104_d) >= 3 and len(vals_w_d) >= 3:
-        _, p_d = stats.ttest_ind(vals_104_d, vals_w_d, equal_var=False)
-        text_d = "***" if p_d < 0.001 else ("**" if p_d < 0.01 else ("*" if p_d < 0.05 else "ns"))
+        _, p_val = stats.ttest_ind(vals1, vals2, equal_var=False)
+        if p_val < 0.001:
+            text = "***"
+        elif p_val < 0.01:
+            text = "**"
+        elif p_val < 0.05:
+            text = "*"
+        else:
+            text = "ns"
 
-        # 找 95 分位数作为括号基准高
-        h_d = max(np.percentile(vals_104_d, 95), np.percentile(vals_w_d, 95))
-        y_coord_d = h_d + spacing
+        idx1 = x_coords.index(x1)
+        idx2 = x_coords.index(x2)
 
-        ax.plot([-0.15, -0.15, 0.15, 0.15], [y_coord_d - bracket_h, y_coord_d, y_coord_d, y_coord_d - bracket_h], lw=1.2, c="black", zorder=5)
-        ax.text(0.0, y_coord_d + 0.01 * y_range, f"{text_d}\n(p={p_d:.2e})", ha="center", va="bottom", fontsize=8, fontweight="bold", zorder=6)
-        y_limits.append(y_coord_d + 3 * bracket_h)
+        span_y = [top_y[i] for i in range(idx1, idx2 + 1)]
+        y_coord = max(span_y) + spacing
 
-    # 2. 药物 e 组比较 (Batch 104 vs Batch w)
-    vals_104_e = plot_df[(plot_df["Drug_Name"] == "Drug e") & (plot_df["Exp"] == "Batch 104")][metric].values
-    vals_w_e = plot_df[(plot_df["Drug_Name"] == "Drug e") & (plot_df["Exp"] == "Batch w")][metric].values
-    if len(vals_104_e) >= 3 and len(vals_w_e) >= 3:
-        _, p_e = stats.ttest_ind(vals_104_e, vals_w_e, equal_var=False)
-        text_e = "***" if p_e < 0.001 else ("**" if p_e < 0.01 else ("*" if p_e < 0.05 else "ns"))
+        # 绘制括号
+        ax.plot([x1, x1, x2, x2], [y_coord - bracket_h, y_coord, y_coord, y_coord - bracket_h], lw=1.0, c="0.3", zorder=5)
+        # 绘制标注文本 (含星号与简要描述)
+        annot = f"{text} (p={p_val:.2e})" if p_val < 0.05 else "ns"
+        ax.text((x1 + x2) * 0.5, y_coord + 0.005 * y_range, annot, ha="center", va="bottom", fontsize=8.5, fontweight="bold", color="0.2", zorder=6)
 
-        h_e = max(np.percentile(vals_104_e, 95), np.percentile(vals_w_e, 95))
-        y_coord_e = h_e + spacing
-
-        ax.plot([0.85, 0.85, 1.15, 1.15], [y_coord_e - bracket_h, y_coord_e, y_coord_e, y_coord_e - bracket_h], lw=1.2, c="black", zorder=5)
-        ax.text(1.0, y_coord_e + 0.01 * y_range, f"{text_e}\n(p={p_e:.2e})", ha="center", va="bottom", fontsize=8, fontweight="bold", zorder=6)
-        y_limits.append(y_coord_e + 3 * bracket_h)
+        # 更新最高位置
+        for i in range(idx1, idx2 + 1):
+            top_y[i] = y_coord + 2.5 * bracket_h
+        y_limits.append(y_coord + 3 * bracket_h)
 
     # 调整 Y 轴上限
     if y_limits:
         ax.set_ylim(y_min, max(y_limits) + 0.05 * y_range)
 
     label = METRIC_LABELS.get(metric, metric)
-    ax.set_xlabel("药物处理", fontsize=12, fontweight="bold")
-    ax.set_ylabel(label, fontsize=12, fontweight="bold")
-    ax.set_title(title or f"批次效应对比图: {label} (Batch 104 vs Batch w)", fontsize=13, fontweight="bold", pad=20)
+    ax.set_xlabel("药物处理", fontsize=11, fontweight="bold")
+    ax.set_ylabel(label, fontsize=11, fontweight="bold")
+    ax.set_title(title or f"批次效应与加药对照分析: {label}", fontsize=12, fontweight="bold", pad=20)
+    
+    # 极简 Nature 样式
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.grid(axis="y", alpha=0.3)
-    ax.legend(title="实验批次", frameon=True)
+    ax.spines["left"].set_linewidth(1.0)
+    ax.spines["bottom"].set_linewidth(1.0)
+    
+    # 轻量级水平网格线
+    ax.grid(True, axis="y", linestyle=":", alpha=0.5, color="#b0bec5")
+    ax.legend(title="实验批次", frameon=True, facecolor="white", edgecolor="none")
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=PPT_DPI, bbox_inches="tight")
