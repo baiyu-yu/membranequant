@@ -445,20 +445,11 @@ def segment_whole_cells_cellpose(
 
     # Cellpose 2.x / 3.x compatibility
     masks: np.ndarray
-    
-    # Check if we should use Cellpose (for built-in models) or CellposeModel (for custom models/SAM)
-    builtin_models = ["cyto", "cyto2", "cyto3", "nuclei"]
-    if model_type in builtin_models:
-        try:
-            model = models.Cellpose(gpu=bool(cfg.cellpose_gpu), model_type=model_type)
-        except TypeError:
-            model = models.Cellpose(gpu=bool(cfg.cellpose_gpu), pretrained_model=model_type)
-    else:
-        try:
-            model = models.CellposeModel(gpu=bool(cfg.cellpose_gpu), model_type=model_type)
-        except TypeError:
-            # Newer cellpose may use pretrained_model=
-            model = models.CellposeModel(gpu=bool(cfg.cellpose_gpu), pretrained_model=model_type)
+    try:
+        model = models.CellposeModel(gpu=bool(cfg.cellpose_gpu), model_type=model_type)
+    except TypeError:
+        # Newer cellpose may use pretrained_model=
+        model = models.CellposeModel(gpu=bool(cfg.cellpose_gpu), pretrained_model=model_type)
 
     eval_kwargs: dict[str, Any] = {
         "diameter": diameter,
