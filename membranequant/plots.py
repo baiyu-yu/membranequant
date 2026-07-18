@@ -22,16 +22,18 @@ import seaborn as sns
 
 from .utils import ensure_dir
 
-# 设置中文字体和样式
+sns.set_style("whitegrid")
+sns.set_palette("husl")
+
+# 设置中文字体和样式 (必须在 sns.set_style 之后，否则会被其覆盖重置)
 plt.rcParams["font.sans-serif"] = [
     "Microsoft YaHei",
     "SimHei",
+    "SimSun",
     "Arial Unicode MS",
     "DejaVu Sans",
 ]
 plt.rcParams["axes.unicode_minus"] = False
-sns.set_style("whitegrid")
-sns.set_palette("husl")
 
 PPT_DPI = 300
 
@@ -773,8 +775,8 @@ def build_summary_from_results(
     df = results_df.copy().replace([np.inf, -np.inf], np.nan)
     if filter_qc and "QC" in df.columns:
         df = df[df["QC"] == "pass"]
-    # 汇总计算时同样全局自动排除 EdgeCenterRatio > 10 的噪点异常细胞，确保均值不受偏离影响
-    if filter_qc and "EdgeCenterRatio" in df.columns:
+    # 汇总计算时全局自动排除 EdgeCenterRatio > 10 的噪点异常细胞，确保均值不受偏离影响
+    if "EdgeCenterRatio" in df.columns:
         df = df[df["EdgeCenterRatio"] <= 10]
     if group_col not in df.columns:
         df = _ensure_condition(df)
