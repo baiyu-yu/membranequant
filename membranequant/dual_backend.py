@@ -14,8 +14,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import warnings
+
 import numpy as np
 from PIL import Image
+
+# Ignore skimage FutureWarnings (min_size, binary_opening deprecation warnings in dualcellquant/skimage)
+warnings.filterwarnings("ignore", category=FutureWarning, module=".*skimage.*")
+warnings.filterwarnings("ignore", category=FutureWarning, module=".*dualcellquant.*")
+warnings.filterwarnings("ignore", message=".*remove_small_objects.*")
+warnings.filterwarnings("ignore", message=".*binary_opening.*")
 
 from .config import Config
 from .io import FieldPair

@@ -22,9 +22,15 @@ from __future__ import annotations
 import argparse
 import sys
 import traceback
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+warnings.filterwarnings("ignore", category=FutureWarning, module=".*skimage.*")
+warnings.filterwarnings("ignore", category=FutureWarning, module=".*dualcellquant.*")
+warnings.filterwarnings("ignore", message=".*remove_small_objects.*")
+warnings.filterwarnings("ignore", message=".*binary_opening.*")
 
 import numpy as np
 
