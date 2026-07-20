@@ -4,9 +4,15 @@ scikit-image>=0.21
 scipy>=1.11
 pandas>=2.0
 matplotlib>=3.7
+seaborn>=0.12
 tifffile>=2023.1
 PyYAML>=6.0
 gradio>=4.0
 
-# Optional deep-learning segmentation (enable via --cellpose or Web UI):
-# pip install cellpose
+# DualCellQuant image-analysis backend:
+dualcellquant @ git+https://github.com/fuji3to4/DualCellQuant.git
+
+# Dependencies required by DualCellQuant:
+# cellpose
+# torch
+

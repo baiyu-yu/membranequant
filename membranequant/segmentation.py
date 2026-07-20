@@ -493,7 +493,7 @@ def segment_whole_cells(
     
     if method == "cellpose":
         return segment_whole_cells_cellpose(green, red, cfg)
-    elif method == "otsu":
+    elif method in ("dualcellquant", "otsu"):
         return segment_whole_cells_otsu(green, red, cfg)
     elif method == "watershed_distance":
         return segment_whole_cells_watershed_distance(green, red, cfg)

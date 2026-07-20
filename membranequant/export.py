@@ -12,7 +12,7 @@ import tifffile
 from .utils import ensure_dir
 
 
-# Primary columns (order for results.csv). Extra columns from measure_cells are appended.
+# Primary columns (order for results.csv). DualCellQuant metrics first.
 CSV_COLUMNS = [
     "Image",
     "Field",
@@ -22,7 +22,10 @@ CSV_COLUMNS = [
     "Condition",
     "CellID",
     "Area",
+    "Area_um2",
     "Perimeter",
+    "AND_Area_px",
+    "AND_Area_um2",
     "WholeGreen",
     "WholeGreenIntegrated",
     "WholeRed",
@@ -31,47 +34,37 @@ CSV_COLUMNS = [
     "MembraneGreenIntegrated",
     "MembraneRed",
     "MembraneRedIntegrated",
+    "MembranePixels",
     "CytoGreen",
     "CytoGreenIntegrated",
-    "MembranePixels",
     "CytoPixels",
-    "M/C",
+    # DualCellQuant primary
+    "Ratio_T_over_R",
+    "RatioOfMeans_T_R",
+    "StdRatio_T_over_R",
+    "SumRatio_T_over_R",
+    "Enrichment_Membrane_vs_Whole",
     "MembraneFraction",
+    "Std_target_on_mask",
+    "Std_reference_on_mask",
+    "Std_target_whole",
+    "Std_reference_whole",
     "RedCoverage",
     "RedCoverageArea",
-    "PearsonMem",
-    # DiI-guided enrichment
-    "M/C_DiI",
-    "MEI",
-    "EdgeCenterRatio",
-    "MembraneFraction_DiI",
-    "MembraneGreen_DiI",
-    "CytoGreen_DiI",
-    "MembraneRed_DiI",
-    "MembranePixels_DiI",
-    "CytoPixels_DiI",
-    # Colocalization
-    "Manders_M1",
-    "Manders_M2",
-    "Costes_ThrGreen",
-    "Costes_ThrRed",
-    "PearsonWhole",
-    "PearsonDiI",
-    "PearsonAboveThr",
-    "DiI_OverlapFraction",
+    "Backend",
     "QC",
     "QC_Reason",
 ]
 
 # Metrics exported to multi-metric summaries / GraphPad
 PRIMARY_METRICS = [
-    "M/C_DiI",
-    "MEI",
-    "Manders_M1",
-    "EdgeCenterRatio",
-    "M/C",
+    "Ratio_T_over_R",
+    "RatioOfMeans_T_R",
+    "Enrichment_Membrane_vs_Whole",
+    "MembraneGreen",
+    "MembraneRed",
     "MembraneFraction",
-    "PearsonWhole",
+    "WholeGreen",
 ]
 
 
@@ -99,14 +92,17 @@ def _sem(x: pd.Series) -> float:
     return float(x.std(ddof=1) / np.sqrt(n))
 
 
-def write_summary_csv(df: pd.DataFrame, path: Path, metric: str = "M/C_DiI") -> pd.DataFrame:
+def write_summary_csv(df: pd.DataFrame, path: Path, metric: str = "Ratio_T_over_R") -> pd.DataFrame:
     """Summary of one metric for QC-pass cells, by Experiment + Drug + Group + Condition."""
     ensure_dir(path.parent)
     passed = df[df["QC"] == "pass"].copy() if "QC" in df.columns else df.copy()
 
-    # Prefer DiI-guided M/C; fall back to classic M/C
+    # Prefer Dual T/R ratio; fall back to enrichment
     if metric not in passed.columns or passed[metric].isna().all():
-        metric = "M/C" if "M/C" in passed.columns else metric
+        for fallback in ("Ratio_T_over_R", "RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole"):
+            if fallback in passed.columns and not passed[fallback].isna().all():
+                metric = fallback
+                break
 
     out_cols = [
         "Experiment",
@@ -204,7 +200,7 @@ def write_multi_metric_summary(df: pd.DataFrame, path: Path) -> pd.DataFrame:
     return out
 
 
-def write_graphpad_csv(df: pd.DataFrame, path: Path, metric: str = "M/C_DiI") -> None:
+def write_graphpad_csv(df: pd.DataFrame, path: Path, metric: str = "Ratio_T_over_R") -> None:
     """Wide GraphPad CSV: one column per Condition for the chosen metric."""
     ensure_dir(path.parent)
     passed = df[df["QC"] == "pass"].copy() if "QC" in df.columns else df.copy()
@@ -213,7 +209,10 @@ def write_graphpad_csv(df: pd.DataFrame, path: Path, metric: str = "M/C_DiI") ->
         return
 
     if metric not in passed.columns or passed[metric].isna().all():
-        metric = "M/C" if "M/C" in passed.columns else metric
+        for fallback in ("Ratio_T_over_R", "RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole"):
+            if fallback in passed.columns and not passed[fallback].isna().all():
+                metric = fallback
+                break
 
     if "Condition" not in passed.columns or passed["Condition"].isna().all():
         col_key = "Group"
@@ -243,8 +242,8 @@ def write_all_graphpad(df: pd.DataFrame, out_dir: Path) -> None:
             continue
         safe = metric.replace("/", "_").replace("\\", "_")
         write_graphpad_csv(df, out_dir / f"graphpad_{safe}.csv", metric=metric)
-    # Keep classic name pointing at recommended metric
-    write_graphpad_csv(df, out_dir / "graphpad_MC.csv", metric="M/C_DiI")
+    # Keep classic filename pointing at Dual primary metric
+    write_graphpad_csv(df, out_dir / "graphpad_MC.csv", metric="Ratio_T_over_R")
 
 
 def save_label_mask(labels: np.ndarray, path: Path) -> None:

@@ -1,40 +1,55 @@
-# MembraneQuant default configuration
-# All parameters are tunable for paper-level reproducibility.
+# MembraneQuant configuration
+# Image analysis backend: DualCellQuant (required)
+# This package only handles experiment I/O + post-analysis (QC / CSV / plots).
 
-# Preprocessing
-rolling_ball_radius: 50
-gaussian_sigma: 1
-enable_denoise: true
+# ---------- DualCellQuant preprocess ----------
+dual_bg_enable: true
+dual_bg_radius: 50
+dual_bg_mode: rolling          # rolling | dark_subtract | manual
+dual_bg_dark_pct: 5.0
+dual_norm_enable: false        # keep false for absolute intensity comparisons
+dual_norm_method: z-score
 
-# Whole-cell segmentation (EGFP or EGFP+DiI; NOT DiI alone)
-# method: otsu (built-in) | cellpose (optional: pip install cellpose)
-segmentation_method: otsu
-segmentation_channel: green  # green | green_red
-threshold: otsu
+# ---------- DualCellQuant segmentation ----------
+dual_seg_source: target        # target=EGFP (recommended) | reference=DiI
+dual_seg_channel: 0            # 0=gray, 1=R, 2=G, 3=B (single-channel TIF → 0)
+dual_measure_channel: gray
+dual_diameter: 0               # 0 = auto
+dual_flow_threshold: 0.4
+dual_cellprob_threshold: 0.0
+dual_use_gpu: false
+dual_drop_edge_cells: true
+dual_inside_fraction_min: 0.9
+dual_edge_margin_pct: 0.0
+
+# ---------- EDT radial membrane ROI ----------
+# 0% = cell center, 100% = boundary; >100 expands into background
+dual_radial_inner_pct: 85
+dual_radial_outer_pct: 100
+dual_radial_min_obj: 0
+
+# ---------- Masks (Target=EGFP, Reference=DiI) ----------
+dual_target_mask_mode: none    # none | global_otsu | global_percentile | per_cell_otsu | per_cell_percentile
+dual_target_mask_percentile: 90
+dual_ref_mask_mode: per_cell_otsu
+dual_ref_mask_percentile: 50
+dual_sat_limit: 255
+dual_min_obj_size: 10
+dual_use_radial_for_target: true
+dual_use_radial_for_ref: true
+dual_and_with_radial: true
+dual_ratio_ref_epsilon: 0.0
+dual_pixel_width_um: 1.0
+dual_pixel_height_um: 1.0
+
+# ---------- QC on Dual outputs ----------
 minimum_cell_area: 500
 maximum_cell_area: 50000
-max_eccentricity: 0.98
-max_saturation_fraction: 0.05
+minimum_and_pixels: 50
+minimum_red_coverage: 0.0      # 0 disables; AND mask already requires DiI
 
-# Cellpose (only when segmentation_method: cellpose)
-cellpose_model: cyto2
-cellpose_diameter: 0      # 0 = auto-estimate
-cellpose_gpu: false
-cellpose_flow_threshold: 0.4
-cellpose_cellprob_threshold: 0.0
-
-# Membrane ring (geometry from cell boundary, not DiI threshold)
-ring_width: 3  # 2, 3, 4, or 5 recommended
-
-# Quality control
-minimum_ring_pixels: 100
-minimum_red_coverage: 0.5
-
-# Export
+# ---------- Export ----------
 save_overlay: true
 save_mask: true
 save_graphpad: true
-compute_pearson: true
-
-# Output relative to selected experiment root (or --output)
 output_dir: Results

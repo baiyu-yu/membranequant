@@ -15,9 +15,9 @@ import numpy as np
 import pandas as pd
 
 from membranequant.config import Config, load_config
+from membranequant.dual_backend import dualcellquant_status
 from membranequant.io import scan_with_report
 from membranequant.main import run_pipeline
-from membranequant.segmentation import cellpose_status
 
 
 def _default_cfg(config_path: Path | None = None) -> Config:
@@ -225,20 +225,11 @@ def run_from_ui(
     except Exception as exc:
         return f"❌ **参数配置无效**：{exc}", empty_df, empty_df, empty_gallery, empty_gallery
 
-    if cfg.segmentation_method == "cellpose":
-        st = cellpose_status()
-        if not st["available"]:
-            return (
-                "❌ **未安装 Cellpose，无法使用深度学习分割。**\n\n"
-                "请在终端执行：\n"
-                "```\npip install cellpose\n```\n\n"
-                "或把「细胞分割方法」改回 **Otsu 阈值法（默认）**，无需额外安装即可分析。",
-                empty_df,
-                empty_df,
-                empty_gallery,
-                empty_gallery,
-            )
-        _log(f"Cellpose 状态：{st['message']}")
+    st = dualcellquant_status()
+    if not st["available"]:
+        _log(f"DualCellQuant 状态：{st['message']}（已启用内置降级模式）")
+    else:
+        _log(f"DualCellQuant 状态：{st['message']}")
 
     def on_progress(message: str, fraction: float) -> None:
         _log(f"[{fraction * 100:5.1f}%] {message}")
@@ -314,8 +305,8 @@ def run_from_ui(
             f"| 输出文件夹 | `{out_path.resolve()}` |\n"
             f"{warn_qc}\n"
             f"**输出说明：**\n"
-            f"- `csv/results.csv`：单细胞明细（**M/C_DiI、MEI、Manders_M1** 等）\n"
-            f"- `csv/summary.csv`：按条件汇总（默认主指标 **M/C_DiI**）\n"
+            f"- `csv/results.csv`：单细胞明细（**Ratio_T_over_R**、**RatioOfMeans_T_R**、**Enrichment_Membrane_vs_Whole** 等）\n"
+            f"- `csv/summary.csv`：按条件汇总（默认主指标 **Ratio_T_over_R**）\n"
             f"- `csv/graphpad_*.csv`：GraphPad 宽表（多指标）\n"
             f"- `overlays/`：分割叠加图 + 红绿共定位散点图\n"
             f"- `plots/`：📊 **300 dpi 统计图（可直接放 PPT）**\n"
@@ -347,20 +338,18 @@ def build_app(config_path: Path | None = None):
     import gradio as gr
 
     cfg = _default_cfg(config_path)
-    cp = cellpose_status()
+    cp = dualcellquant_status()
     if cp["available"]:
         if cp.get("cuda_available"):
             cuda_status = " 🚀 **(CUDA GPU加速已启用)**"
         else:
             cuda_status = (
-                "\n\n⚠️ **检测到 CUDA 未启用**：当前环境下的 PyTorch 未编译 GPU 支持（或者没有安装正确的 CUDA 依赖）。"
-                "运行 Cellpose 时只能以 CPU 慢速模式运行。您的电脑有显卡，请参考下方指南重新安装支持 CUDA 的 PyTorch。"
+                "\n\n⚠️ **检测到 CUDA 未启用**：当前 PyTorch 为 CPU 模式。"
             )
-        cp_banner = f"✅ **Cellpose 已安装**（版本: {cp.get('version') or '未知'}）{cuda_status}，可选用深度学习分割。"
+        cp_banner = f"✅ **DualCellQuant 已准备就绪**（版本: {cp.get('version') or '最新'}）{cuda_status}。"
     else:
         cp_banner = (
-            "⚪ **Cellpose 未安装** — 默认的 Otsu 阈值分割可直接用；"
-            "若要用深度学习分割，请执行 `pip install cellpose`。"
+            "⚪ **DualCellQuant 未安装** — 请运行 `pip install \"git+https://github.com/fuji3to4/DualCellQuant.git\"`。"
         )
 
     with gr.Blocks(title="MembraneQuant 膜定位定量") as demo:

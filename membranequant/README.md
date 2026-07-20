@@ -1,14 +1,11 @@
 # MembraneQuant
 
-Quantification of membrane localization of EGFP-tagged proteins using DiI membrane staining.
+Quantification of membrane localization of EGFP-tagged proteins using DualCellQuant + DiI membrane staining.
 
-## Design principle
+## Design principle & Architecture
 
-**Do not let DiI define cell boundaries.** DiI only answers “is the membrane stained here?”
-
-1. Segment whole cells from **EGFP** (or EGFP+DiI).
-2. Build a fixed-width **membrane ring** from the cell boundary (geometry).
-3. Use **DiI red coverage** only as QC for the ring.
+- **Image Analysis Backend**: Powered by [DualCellQuant](https://github.com/fuji3to4/DualCellQuant) (Cellpose segmentation, EDT radial membrane extraction, background correction, Target/Reference masks).
+- **Experiment Management & Post-Analysis**: MembraneQuant provides experiment folder scanning, pairing, quality control filtering, GraphPad CSV exporting, Gradio Web UI, and 300 dpi PPT-ready statistical charts.
 
 ## Install
 
@@ -152,13 +149,11 @@ Results/
 
 | Metric | Meaning | Use |
 |--------|---------|-----|
-| **M/C_DiI** | Mean green on DiI-guided membrane / mean green in cytoplasm | **Primary** membrane localization |
-| **MEI** | (I_mem − I_cyto) / (I_mem + I_cyto) ∈ (−1, 1) | Robust enrichment index |
-| **Manders_M1** | Fraction of green co-occurring with DiI (Costes thr.) | Classic colocalization (Coloc2-style) |
-| **EdgeCenterRatio** | Outer-shell / inner-core green mean | Backup when DiI is uneven |
-| M/C, MembraneFraction | Geometric ring only | Traditional / QC |
-| PearsonWhole | Pixel correlation green↔red | Pattern correlation (noise-sensitive) |
-| RedCoverage | DiI coverage of geometric ring | **QC only**, not biology |
+| **Ratio_T_over_R** | T/R pixel-wise intensity ratio (Dual membrane ROI) | **Primary** DualCellQuant membrane localization |
+| **RatioOfMeans_T_R** | Target mean / Reference mean on Dual membrane ROI | Mean-level T/R ratio |
+| **Enrichment_Membrane_vs_Whole** | Membrane EGFP mean / Whole-cell EGFP mean | EGFP membrane enrichment |
+| **MembraneFraction** | Integrated EGFP on membrane / Whole-cell total | Fraction of signal on membrane |
+| **RedCoverage** | Reference (DiI) coverage of membrane ROI | **QC only**, not biology |
 
 Pipeline: background correction → cell segmentation (EGFP) → geometric membrane ring + **DiI-guided membrane mask** → enrichment + Manders/Pearson → QC → CSV + `plots/` (300 dpi).
 

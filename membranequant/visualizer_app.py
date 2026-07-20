@@ -44,15 +44,21 @@ from membranequant.plots import (
 )
 
 METRIC_CHOICES = [
-    ("M/C_DiI — DiI引导膜/质比【推荐·膜定位主指标】", "M/C_DiI"),
-    ("MEI — 膜富集指数 (I_m-I_c)/(I_m+I_c)【推荐】", "MEI"),
-    ("Manders_M1 — 绿色与DiI共现比例 (Costes阈值)【共定位主指标】", "Manders_M1"),
-    ("EdgeCenterRatio — 边缘/中心强度比（不依赖DiI）", "EdgeCenterRatio"),
-    ("PearsonWhole — 全细胞红绿 Pearson r", "PearsonWhole"),
-    ("M/C — 几何膜环膜/质比（传统）", "M/C"),
-    ("MembraneFraction — 几何膜环绿色积分占比", "MembraneFraction"),
-    ("MembraneFraction_DiI — DiI膜上绿色积分占比", "MembraneFraction_DiI"),
-    ("Manders_M2 — 红色与绿共现比例", "Manders_M2"),
+    ("Ratio_T_over_R — T/R 像素比 (Dual 膜区)【推荐·DualCellQuant膜定位主指标】", "Ratio_T_over_R"),
+    ("RatioOfMeans_T_R — T/R 均值比 (Dual 膜区)", "RatioOfMeans_T_R"),
+    ("Enrichment_Membrane_vs_Whole — 膜/全细胞富集 (EGFP)", "Enrichment_Membrane_vs_Whole"),
+    ("MembraneGreen — 膜区 EGFP 均值", "MembraneGreen"),
+    ("MembraneRed — 膜区 DiI 均值", "MembraneRed"),
+    ("MembraneFraction — 膜区 EGFP 积分占比", "MembraneFraction"),
+    ("WholeGreen — 全细胞 EGFP 均值", "WholeGreen"),
+    ("WholeRed — 全细胞 DiI 均值", "WholeRed"),
+    ("RedCoverage — DiI 覆盖率", "RedCoverage"),
+    ("M/C_DiI — DiI引导膜/质比（旧版）", "M/C_DiI"),
+    ("MEI — 膜富集指数（旧版）", "MEI"),
+    ("Manders_M1 — 绿与DiI共现比例（旧版）", "Manders_M1"),
+    ("EdgeCenterRatio — 边缘/中心强度比（旧版）", "EdgeCenterRatio"),
+    ("PearsonWhole — 全细胞 Pearson r（旧版）", "PearsonWhole"),
+    ("M/C — 几何膜环膜/质比（旧版）", "M/C"),
 ]
 
 
@@ -68,7 +74,17 @@ def _load_csv(file_obj) -> pd.DataFrame:
 def _pick_metric(df: pd.DataFrame, selected: str) -> str:
     if selected in df.columns and df[selected].notna().any():
         return selected
-    for m in ("M/C_DiI", "MEI", "Manders_M1", "M/C", "MembraneFraction"):
+    for m in (
+        "Ratio_T_over_R",
+        "RatioOfMeans_T_R",
+        "Enrichment_Membrane_vs_Whole",
+        "MembraneGreen",
+        "M/C_DiI",
+        "MEI",
+        "Manders_M1",
+        "M/C",
+        "MembraneFraction",
+    ):
         if m in df.columns and df[m].notna().any():
             return m
     # last resort: first numeric
@@ -209,9 +225,9 @@ def process_upload(file_obj, group_col, selected_metric, filter_qc, save_dir):
     lines.append(
         "\n---\n"
         "**指标怎么读**\n"
-        "- `M/C_DiI` / `MEI` ↑ → 绿色蛋白更偏膜\n"
-        "- `Manders_M1` ↑ → 更多绿色与 DiI 共现（共定位）\n"
-        "- `PearsonWhole` → 红绿线性相关（易受 SNR/背景影响）\n"
+        "- `Ratio_T_over_R` / `RatioOfMeans_T_R` ↑ → EGFP 蛋白更富集于 DiI 标注的膜区\n"
+        "- `Enrichment_Membrane_vs_Whole` ↑ → 膜区荧光强度显著高于全细胞平均水平\n"
+        "- `RedCoverage` → 评估 Reference 膜标注连续度与质控\n"
         "- 对角线以上的膜-胞质散点 → 膜富集"
     )
 
@@ -251,10 +267,10 @@ def build_gui():
 
 | 推荐指标 | 含义 | 何时用 |
 |---------|------|--------|
-| **M/C_DiI** | DiI 掩膜上的绿均值 / 胞质绿均值 | 膜募集/转位主指标 |
-| **MEI** | (膜-质)/(膜+质)，∈(-1,1) | 组间比较更稳健 |
-| **Manders M1** | Costes 阈值下绿与 DiI 共现比例 | 标准共定位（Coloc2 思路） |
-| **Edge/Center** | 几何边缘/中心强度比 | DiI 染色不均时的备份 |
+| **Ratio_T_over_R** | Dual 膜区 T/R 像素级强度比值 | 膜募集/转位首选主指标 |
+| **RatioOfMeans_T_R** | Dual 膜区 Target均值 / Reference均值 | 均值层面的膜转位定量 |
+| **Enrichment_Membrane_vs_Whole** | 膜区 EGFP 均值 / 全细胞 EGFP 均值 | 膜/全细胞富集程度 |
+| **RedCoverage** | 膜区 DiI 信号覆盖率 | 质控 / 评估膜标志质量 |
 
 ### 🔬 统计学显著性与数据过滤标准
 
@@ -289,7 +305,7 @@ def build_gui():
                 )
                 metric_select = gr.Dropdown(
                     choices=METRIC_CHOICES,
-                    value="M/C_DiI",
+                    value="Ratio_T_over_R",
                     label="主分析指标",
                 )
                 filter_qc = gr.Checkbox(label="仅统计 QC=pass 细胞", value=True)

@@ -38,18 +38,21 @@ plt.rcParams["axes.unicode_minus"] = False
 PPT_DPI = 300
 
 METRIC_LABELS = {
+    "Ratio_T_over_R": "T/R 像素比 (Dual 膜区)",
+    "RatioOfMeans_T_R": "T/R 均值比 (Dual 膜区)",
+    "Enrichment_Membrane_vs_Whole": "膜/全细胞富集 (EGFP)",
+    "MembraneGreen": "膜区 EGFP 均值",
+    "MembraneRed": "膜区 DiI 均值",
+    "MembraneFraction": "膜区 EGFP 积分占比",
+    "WholeGreen": "全细胞 EGFP 均值",
+    "WholeRed": "全细胞 DiI 均值",
+    "RedCoverage": "DiI 覆盖率",
+    # legacy labels (if old CSVs loaded)
     "M/C_DiI": "M/C (DiI引导膜/质比)",
     "MEI": "膜富集指数 MEI",
     "Manders_M1": "Manders M1 (绿∩红)",
-    "Manders_M2": "Manders M2 (红∩绿)",
-    "EdgeCenterRatio": "边缘/中心强度比",
     "M/C": "M/C (几何膜环)",
-    "MembraneFraction": "膜荧光占比",
-    "MembraneFraction_DiI": "DiI膜荧光占比",
     "PearsonWhole": "Pearson r (全细胞)",
-    "PearsonMem": "Pearson r (膜环)",
-    "PearsonDiI": "Pearson r (DiI膜)",
-    "RedCoverage": "DiI覆盖率",
 }
 
 
@@ -60,9 +63,11 @@ def _pass_df(results_df: pd.DataFrame) -> pd.DataFrame:
     df = df.replace([np.inf, -np.inf], np.nan)
     if "QC" in df.columns:
         df = df[df["QC"] == "pass"].copy()
-    # 全局自动排除 EdgeCenterRatio > 10 的亮背景噪点异常细胞
+    # 排除异常富集比（旧指标或 Dual 富集）
     if "EdgeCenterRatio" in df.columns:
         df = df[df["EdgeCenterRatio"] <= 10].copy()
+    if "Enrichment_Membrane_vs_Whole" in df.columns:
+        df = df[df["Enrichment_Membrane_vs_Whole"] <= 20].copy()
     return df
 
 
@@ -268,7 +273,7 @@ def plot_mc_comparison_bar(
 
     # 添加显著性标记
     if results_df is not None:
-        metric = summary_df["Metric"].iloc[0] if "Metric" in summary_df.columns else "M/C_DiI"
+        metric = summary_df["Metric"].iloc[0] if "Metric" in summary_df.columns else "Ratio_T_over_R"
         conditions = list(df["Condition"].astype(str).values)
         clean_results = _ensure_condition(_pass_df(results_df))
         if "EdgeCenterRatio" in clean_results.columns:
@@ -286,7 +291,7 @@ def plot_mc_comparison_bar(
 def plot_metric_boxplot(
     results_df: pd.DataFrame,
     output_path: Path,
-    metric: str = "M/C_DiI",
+    metric: str = "Ratio_T_over_R",
     title: str | None = None,
 ) -> None:
     """箱线图 + 单细胞散点。"""
@@ -362,7 +367,7 @@ def plot_mc_boxplot(
 def plot_metric_violin(
     results_df: pd.DataFrame,
     output_path: Path,
-    metric: str = "M/C_DiI",
+    metric: str = "Ratio_T_over_R",
     title: str | None = None,
 ) -> None:
     """小提琴图（发表常用）。"""
@@ -424,7 +429,13 @@ def plot_multi_metric_bars(
     """多指标均值 ± SEM 分组柱状图（一张图看趋势是否一致）。"""
     ensure_dir(output_path.parent)
     df = _ensure_condition(_pass_df(results_df))
-    metrics = metrics or ["M/C_DiI", "MEI", "Manders_M1", "EdgeCenterRatio", "PearsonWhole"]
+    metrics = metrics or [
+        "Ratio_T_over_R",
+        "RatioOfMeans_T_R",
+        "Enrichment_Membrane_vs_Whole",
+        "MembraneGreen",
+        "MembraneRed",
+    ]
     metrics = [m for m in metrics if m in df.columns]
     if df.empty or not metrics:
         _empty_fig(output_path, "无可用指标")
@@ -584,15 +595,23 @@ def plot_correlation_heatmap(
         return
 
     numeric_cols = [
+        "Ratio_T_over_R",
+        "RatioOfMeans_T_R",
+        "Enrichment_Membrane_vs_Whole",
+        "MembraneGreen",
+        "MembraneRed",
+        "MembraneFraction",
+        "WholeGreen",
+        "WholeRed",
+        "RedCoverage",
+        "Area",
+        "AND_Area_px",
         "M/C_DiI",
         "MEI",
         "Manders_M1",
         "EdgeCenterRatio",
         "M/C",
-        "MembraneFraction",
         "PearsonWhole",
-        "RedCoverage",
-        "Area",
         "MembraneGreen_DiI",
         "CytoGreen_DiI",
     ]
@@ -639,8 +658,20 @@ def plot_scatter_membrane_vs_cyto(
     ensure_dir(output_path.parent)
     df = _ensure_condition(_pass_df(results_df))
 
-    xcol = "CytoGreen_DiI" if "CytoGreen_DiI" in df.columns else "CytoGreen"
-    ycol = "MembraneGreen_DiI" if "MembraneGreen_DiI" in df.columns else "MembraneGreen"
+    if "CytoGreen_DiI" in df.columns and df["CytoGreen_DiI"].notna().any():
+        xcol = "CytoGreen_DiI"
+    elif "CytoGreen" in df.columns and df["CytoGreen"].notna().any():
+        xcol = "CytoGreen"
+    elif "WholeGreen" in df.columns and df["WholeGreen"].notna().any():
+        xcol = "WholeGreen"
+    else:
+        xcol = "WholeRed"
+
+    if "MembraneGreen_DiI" in df.columns and df["MembraneGreen_DiI"].notna().any():
+        ycol = "MembraneGreen_DiI"
+    else:
+        ycol = "MembraneGreen"
+
     if df.empty or xcol not in df.columns or ycol not in df.columns:
         _empty_fig(output_path)
         return
@@ -722,10 +753,11 @@ def plot_coloc_dashboard(
 ) -> None:
     """共定位三联图：Manders M1 / Pearson / MEI。"""
     ensure_dir(output_path.parent)
-    df = _ensure_condition(_pass_df(results_df))
-    metrics = [m for m in ("Manders_M1", "PearsonWhole", "MEI") if m in df.columns]
+    dual_metrics = [m for m in ("Ratio_T_over_R", "RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole") if m in df.columns]
+    legacy_metrics = [m for m in ("Manders_M1", "PearsonWhole", "MEI") if m in df.columns]
+    metrics = dual_metrics if dual_metrics else legacy_metrics
     if df.empty or not metrics:
-        _empty_fig(output_path, "无共定位指标")
+        _empty_fig(output_path, "无共定位/膜富集指标")
         return
 
     fig, axes = plt.subplots(1, len(metrics), figsize=(5 * len(metrics), 5))
@@ -767,7 +799,7 @@ def plot_coloc_dashboard(
 
 def build_summary_from_results(
     results_df: pd.DataFrame,
-    metric: str = "M/C_DiI",
+    metric: str = "Ratio_T_over_R",
     group_col: str = "Condition",
     filter_qc: bool = True,
 ) -> pd.DataFrame:
@@ -813,7 +845,7 @@ def generate_all_plots(
     results_df: pd.DataFrame,
     summary_df: pd.DataFrame,
     output_dir: Path,
-    metric: str = "M/C_DiI",
+    metric: str = "Ratio_T_over_R",
 ) -> list[Path]:
     """生成所有统计图表，返回生成的文件路径列表。"""
     plots_dir = ensure_dir(Path(output_dir) / "plots")
@@ -856,7 +888,7 @@ def generate_all_plots(
 def plot_batch_effect_comparison(
     results_df: pd.DataFrame,
     output_path: Path,
-    metric: str = "M/C_DiI",
+    metric: str = "Ratio_T_over_R",
     title: str | None = None,
 ) -> None:
     """绘制批次效应对比图（实验 104 vs 实验 w）。

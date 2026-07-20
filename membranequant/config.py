@@ -1,4 +1,4 @@
-"""Configuration loading and defaults for MembraneQuant."""
+"""Configuration loading and defaults for MembraneQuant + DualCellQuant."""
 
 from __future__ import annotations
 
@@ -13,41 +13,80 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
 @dataclass
 class Config:
-    """All tunable pipeline parameters."""
+    """All tunable pipeline parameters.
 
-    rolling_ball_radius: int = 50
-    gaussian_sigma: float = 1.0
-    enable_denoise: bool = True
-    # Whole-cell segmentation methods:
-    # - otsu: 经典Otsu阈值（默认）
-    # - watershed_distance: 距离变换+分水岭（适合圆形粘连细胞）
-    # - watershed_gradient: 梯度+分水岭（适合边界清晰的细胞）
-    # - hminima_watershed: H-minima+分水岭（适合密集粘连细胞）
-    # - morphological_opening: 形态学开运算（适合轻度粘连）
-    # - combined_markers: 距离+梯度双重markers（综合方法）
-    # - cellpose: 深度学习（需安装cellpose）
-    segmentation_method: str = "otsu"
-    segmentation_channel: str = "green"  # green | green_red
-    threshold: str = "otsu"
+    Image analysis is performed by DualCellQuant. MembraneQuant only handles
+    experiment I/O and post-analysis (QC / CSV / plots).
+    """
+
+    # ----- DualCellQuant: preprocess -----
+    dual_bg_enable: bool = True
+    dual_bg_radius: int = 50
+    dual_bg_mode: str = "rolling"  # rolling | dark_subtract | manual
+    dual_bg_dark_pct: float = 5.0
+    dual_norm_enable: bool = False
+    dual_norm_method: str = "z-score"  # z-score | robust z-score | min-max | percentile
+
+    # ----- DualCellQuant: segmentation (Cellpose) -----
+    dual_seg_source: str = "target"  # target=EGFP | reference=DiI
+    dual_seg_channel: int = 0  # 0=gray, 1=R, 2=G, 3=B
+    dual_measure_channel: str = "gray"  # gray|r|g|b for single-channel TIFs use gray
+    dual_diameter: float = 0.0  # 0 = auto
+    dual_flow_threshold: float = 0.4
+    dual_cellprob_threshold: float = 0.0
+    dual_use_gpu: bool = False
+    dual_drop_edge_cells: bool = True
+    dual_inside_fraction_min: float = 0.9
+    dual_edge_margin_pct: float = 0.0
+
+    # ----- DualCellQuant: EDT radial membrane -----
+    dual_radial_inner_pct: float = 85.0  # 0=center, 100=boundary
+    dual_radial_outer_pct: float = 100.0
+    dual_radial_min_obj: int = 0
+
+    # ----- DualCellQuant: masks -----
+    dual_target_mask_mode: str = "none"  # none|global_otsu|global_percentile|per_cell_otsu|per_cell_percentile
+    dual_target_mask_percentile: float = 90.0
+    dual_ref_mask_mode: str = "per_cell_otsu"
+    dual_ref_mask_percentile: float = 50.0
+    dual_sat_limit: float = 255.0
+    dual_min_obj_size: int = 10
+    dual_use_radial_for_target: bool = True
+    dual_use_radial_for_ref: bool = True
+    dual_and_with_radial: bool = True
+    dual_ratio_ref_epsilon: float = 0.0
+    dual_pixel_width_um: float = 1.0
+    dual_pixel_height_um: float = 1.0
+
+    # ----- QC (on Dual outputs) -----
     minimum_cell_area: int = 500
     maximum_cell_area: int = 50000
-    max_eccentricity: float = 0.98
-    max_saturation_fraction: float = 0.05
-    # Cellpose options (only used when segmentation_method == cellpose)
-    cellpose_model: str = "cyto2"  # cyto | cyto2 | cyto3 | nuclei | ...
-    cellpose_diameter: float = 0.0  # 0 = auto
-    cellpose_gpu: bool = False
-    cellpose_flow_threshold: float = 0.4
-    cellpose_cellprob_threshold: float = 0.0
-    # Membrane ring (geometry from cell boundary, not DiI threshold)
-    ring_width: int = 3
-    minimum_ring_pixels: int = 100
-    minimum_red_coverage: float = 0.5
+    minimum_and_pixels: int = 50
+    minimum_red_coverage: float = 0.0  # 0 = disabled when Dual AND already requires ref
+
+    # ----- Export -----
     save_overlay: bool = True
     save_mask: bool = True
     save_graphpad: bool = True
-    compute_pearson: bool = True
     output_dir: str = "Results"
+
+    # ----- Legacy aliases (ignored by Dual path; kept so old YAML still loads) -----
+    rolling_ball_radius: int = 50
+    gaussian_sigma: float = 1.0
+    enable_denoise: bool = True
+    segmentation_method: str = "dualcellquant"
+    segmentation_channel: str = "green"
+    threshold: str = "otsu"
+    max_eccentricity: float = 0.98
+    max_saturation_fraction: float = 0.05
+    cellpose_model: str = "cyto2"
+    cellpose_diameter: float = 0.0
+    cellpose_gpu: bool = False
+    cellpose_flow_threshold: float = 0.4
+    cellpose_cellprob_threshold: float = 0.0
+    ring_width: int = 3
+    minimum_ring_pixels: int = 100
+    compute_pearson: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -63,7 +102,6 @@ def _resolve_field_types() -> dict[str, Any]:
 def _coerce_value(field_type: Any, value: Any) -> Any:
     if value is None:
         return value
-    # With from __future__ import annotations, types may be strings
     if isinstance(field_type, str):
         type_map = {"int": int, "float": float, "bool": bool, "str": str}
         field_type = type_map.get(field_type, field_type)
@@ -108,30 +146,68 @@ def load_config(path: str | Path | None = None, overrides: dict[str, Any] | None
                 continue
             setattr(cfg, key, _coerce_value(type_map[key], value))
 
+    # Sync legacy knobs into Dual when user only set old names
+    if overrides:
+        if "rolling_ball_radius" in overrides and "dual_bg_radius" not in overrides:
+            cfg.dual_bg_radius = int(cfg.rolling_ball_radius)
+        if "cellpose_gpu" in overrides and "dual_use_gpu" not in overrides:
+            cfg.dual_use_gpu = bool(cfg.cellpose_gpu)
+        if "cellpose_diameter" in overrides and "dual_diameter" not in overrides:
+            cfg.dual_diameter = float(cfg.cellpose_diameter)
+        if "cellpose_flow_threshold" in overrides and "dual_flow_threshold" not in overrides:
+            cfg.dual_flow_threshold = float(cfg.cellpose_flow_threshold)
+        if "cellpose_cellprob_threshold" in overrides and "dual_cellprob_threshold" not in overrides:
+            cfg.dual_cellprob_threshold = float(cfg.cellpose_cellprob_threshold)
+        if "minimum_ring_pixels" in overrides and "minimum_and_pixels" not in overrides:
+            cfg.minimum_and_pixels = int(cfg.minimum_ring_pixels)
+
     _validate_config(cfg)
     return cfg
 
 
+_MASK_MODES = {
+    "none",
+    "global_otsu",
+    "global_percentile",
+    "per_cell_otsu",
+    "per_cell_percentile",
+}
+
+
 def _validate_config(cfg: Config) -> None:
-    method = cfg.segmentation_method.strip().lower()
-    valid_methods = {
-        "otsu", "cellpose", "watershed_distance", "watershed_gradient",
-        "hminima_watershed", "morphological_opening", "combined_markers"
-    }
-    if method not in valid_methods:
-        raise ValueError(
-            f"segmentation_method must be one of: {', '.join(sorted(valid_methods))}"
-        )
-    cfg.segmentation_method = method
-    if cfg.segmentation_channel not in {"green", "green_red"}:
-        raise ValueError("segmentation_channel must be 'green' or 'green_red'")
-    if cfg.ring_width < 1:
-        raise ValueError("ring_width must be >= 1")
+    cfg.dual_seg_source = cfg.dual_seg_source.strip().lower()
+    if cfg.dual_seg_source not in {"target", "reference"}:
+        raise ValueError("dual_seg_source must be 'target' (EGFP) or 'reference' (DiI)")
+    cfg.dual_bg_mode = cfg.dual_bg_mode.strip().lower()
+    if cfg.dual_bg_mode not in {"rolling", "dark_subtract", "manual"}:
+        raise ValueError("dual_bg_mode must be rolling|dark_subtract|manual")
+    cfg.dual_target_mask_mode = cfg.dual_target_mask_mode.strip().lower()
+    cfg.dual_ref_mask_mode = cfg.dual_ref_mask_mode.strip().lower()
+    if cfg.dual_target_mask_mode not in _MASK_MODES:
+        raise ValueError(f"dual_target_mask_mode must be one of {sorted(_MASK_MODES)}")
+    if cfg.dual_ref_mask_mode not in _MASK_MODES:
+        raise ValueError(f"dual_ref_mask_mode must be one of {sorted(_MASK_MODES)}")
+    if cfg.dual_radial_inner_pct < 0:
+        raise ValueError("dual_radial_inner_pct must be >= 0")
+    if cfg.dual_radial_outer_pct < cfg.dual_radial_inner_pct:
+        raise ValueError("dual_radial_outer_pct must be >= dual_radial_inner_pct")
     if cfg.minimum_cell_area >= cfg.maximum_cell_area:
         raise ValueError("minimum_cell_area must be < maximum_cell_area")
     if not 0.0 <= cfg.minimum_red_coverage <= 1.0:
         raise ValueError("minimum_red_coverage must be in [0, 1]")
-    if not 0.0 <= cfg.max_saturation_fraction <= 1.0:
-        raise ValueError("max_saturation_fraction must be in [0, 1]")
-    if cfg.cellpose_diameter < 0:
-        raise ValueError("cellpose_diameter must be >= 0 (0 = auto)")
+    if cfg.dual_diameter < 0:
+        raise ValueError("dual_diameter must be >= 0 (0 = auto)")
+    valid_methods = {
+        "dualcellquant",
+        "otsu",
+        "cellpose",
+        "watershed_distance",
+        "watershed_gradient",
+        "hminima_watershed",
+        "morphological_opening",
+        "combined_markers",
+    }
+    if cfg.segmentation_method and cfg.segmentation_method.strip().lower() not in valid_methods:
+        raise ValueError(f"Unknown segmentation_method: {cfg.segmentation_method}")
+    if not cfg.segmentation_method:
+        cfg.segmentation_method = "dualcellquant"
