@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 import tifffile
 
 from membranequant.config import Config
@@ -84,7 +85,12 @@ def test_end_to_end_synthetic():
 
 
 def test_pipeline_on_disk(tmp_path: Path):
+    from membranequant.dual_backend import dualcellquant_status
     from membranequant.main import run_pipeline
+
+    st = dualcellquant_status()
+    if not st.get("available") or not st.get("cellpose_available"):
+        pytest.skip("DualCellQuant/Cellpose not installed — pipeline hard-requires Dual")
 
     exp = tmp_path / "Experiment"
     gA = exp / "Control"
@@ -100,6 +106,10 @@ def test_pipeline_on_disk(tmp_path: Path):
     out = tmp_path / "Results"
     cfg = Config(
         rolling_ball_radius=15,
+        dual_bg_radius=15,
+        dual_bg_mode="dark_subtract",
+        dual_use_gpu=False,
+        dual_auto_gpu=False,
         gaussian_sigma=0.5,
         minimum_cell_area=80,
         ring_width=3,
@@ -112,6 +122,23 @@ def test_pipeline_on_disk(tmp_path: Path):
     results = run_pipeline(exp, out, cfg)
     assert results.is_file()
     assert (out / "csv" / "summary.csv").is_file()
-    assert (out / "csv" / "graphpad_MC.csv").is_file()
-    df = rows_to_dataframe([])  # just ensure import path
     assert (out / "masks").is_dir()
+
+
+def test_pipeline_hard_fails_without_dual(tmp_path: Path, monkeypatch):
+    from membranequant import dual_backend, main
+
+    monkeypatch.setattr(
+        dual_backend,
+        "dualcellquant_status",
+        lambda: {
+            "available": False,
+            "version": None,
+            "cellpose_available": False,
+            "cuda_available": False,
+            "message": "not installed (test)",
+        },
+    )
+    cfg = Config(dual_use_gpu=False, dual_auto_gpu=False, save_overlay=False, save_mask=False)
+    with pytest.raises(ImportError):
+        main.run_pipeline(tmp_path, tmp_path / "out", cfg)

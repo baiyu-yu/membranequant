@@ -39,7 +39,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from membranequant.config import Config, load_config
-from membranequant.dual_backend import analyze_field_dual, dualcellquant_status
+from membranequant.dual_backend import analyze_field_dual, describe_runtime, dualcellquant_status
 from membranequant.export import (
     rows_to_dataframe,
     save_label_mask,
@@ -75,6 +75,13 @@ def process_field(
         "condition_id": pair.condition_id,
     }
     result = analyze_field_dual(pair, cfg, meta=meta)
+    if result.timings:
+        logger.info(
+            "  %s timings: %s | used_gpu=%s",
+            pair.image_id,
+            {k: round(v, 3) for k, v in result.timings.items()},
+            result.used_gpu,
+        )
     rows = apply_qc(result.rows, cfg)
 
     safe_name = pair.image_id.replace("/", "_").replace("\\", "_")
@@ -147,9 +154,33 @@ def run_pipeline(
     logger.info("MembraneQuant start (DualCellQuant backend)")
     logger.info("Input:  %s", input_dir)
     logger.info("Output: %s", output_dir)
+    runtime = describe_runtime(cfg)
+    logger.info("Runtime: %s", runtime["summary"])
+    logger.info("DualCellQuant status: %s", runtime["message"])
+    if not runtime.get("available") or not runtime.get("cellpose_available"):
+        raise ImportError(
+            "DualCellQuant + Cellpose are required (no silent fallback).\n"
+            f"Status: {runtime.get('message')}"
+        )
+    if runtime.get("dual_use_gpu_requested") and not runtime.get("cuda_available"):
+        logger.warning(
+            "GPU was requested but CUDA is not available — Cellpose will run on CPU."
+        )
+    if runtime.get("will_use_gpu"):
+        logger.info(
+            "Cellpose stage will use GPU (%s). Post-seg (EDT / masks / rolling-ball quant) is CPU-only.",
+            runtime.get("cuda_device_name") or "CUDA",
+        )
+    else:
+        logger.warning(
+            "Cellpose stage is on CPU — GPU will stay near-idle. "
+            "Enable GPU in UI / set dual_use_gpu: true / pass --gpu."
+        )
+    logger.info(
+        "Speed tips: dual_bg_mode=dark_subtract (not rolling); set dual_diameter to fixed px "
+        "(0=auto is slower); Dual model is cpdino/Cellpose-SAM (heavier than classic cyto2)."
+    )
     logger.info("Config: %s", cfg.to_dict())
-    st = dualcellquant_status()
-    logger.info("DualCellQuant status: %s", st["message"])
 
     _progress("Scanning input folder…", 0.02)
     pairs = scan_pairs(input_dir)
@@ -247,7 +278,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Dual target (EGFP) mask mode.",
     )
     p.add_argument("--diameter", type=float, default=None, help="Cellpose diameter (0=auto).")
-    p.add_argument("--gpu", action="store_true", help="Use GPU for Dual Cellpose.")
+    p.add_argument("--gpu", action="store_true", help="Force GPU for Dual Cellpose.")
+    p.add_argument("--no-gpu", action="store_true", help="Force CPU for Dual Cellpose.")
     p.add_argument("--no-overlay", action="store_true", help="Disable overlay export.")
     p.add_argument("--no-mask", action="store_true", help="Disable mask export.")
     p.add_argument("--host", type=str, default="127.0.0.1", help="Web UI host.")
@@ -292,7 +324,13 @@ def main(argv: list[str] | None = None) -> int:
         overrides["dual_diameter"] = args.diameter
     if args.cellpose_diameter is not None:
         overrides["dual_diameter"] = args.cellpose_diameter
-    if args.gpu or args.cellpose_gpu:
+    if args.no_gpu and (args.gpu or args.cellpose_gpu):
+        print("Error: --gpu and --no-gpu are mutually exclusive.", file=sys.stderr)
+        return 2
+    if args.no_gpu:
+        overrides["dual_use_gpu"] = False
+        overrides["dual_auto_gpu"] = False
+    elif args.gpu or args.cellpose_gpu:
         overrides["dual_use_gpu"] = True
     if args.no_overlay:
         overrides["save_overlay"] = False
@@ -304,13 +342,22 @@ def main(argv: list[str] | None = None) -> int:
     st = dualcellquant_status()
     if not st["available"] or not st["cellpose_available"]:
         print(
-            "Error: DualCellQuant + Cellpose are required for image analysis.\n"
+            "Error: DualCellQuant + Cellpose are required for image analysis (no fallback).\n"
             '  pip install "git+https://github.com/fuji3to4/DualCellQuant.git"\n'
             "  pip install cellpose torch\n"
+            "  For GPU: install CUDA build of torch\n"
             f"Status: {st['message']}",
             file=sys.stderr,
         )
         return 1
+    rt = describe_runtime(cfg)
+    print(f"Runtime: {rt['summary']}")
+    if not rt["will_use_gpu"]:
+        print(
+            "Note: Cellpose is NOT using GPU. Pass --gpu if CUDA is installed, "
+            "or check torch.cuda.is_available().",
+            file=sys.stderr,
+        )
 
     input_dir = args.input.resolve()
     if args.output is not None:

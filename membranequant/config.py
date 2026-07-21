@@ -34,7 +34,8 @@ class Config:
     dual_diameter: float = 0.0  # 0 = auto
     dual_flow_threshold: float = 0.4
     dual_cellprob_threshold: float = 0.0
-    dual_use_gpu: bool = False
+    dual_use_gpu: bool = True  # use CUDA when available; set false to force CPU
+    dual_auto_gpu: bool = True  # if True and CUDA is free, force dual_use_gpu on unless overridden
     dual_drop_edge_cells: bool = True
     dual_inside_fraction_min: float = 0.9
     dual_edge_margin_pct: float = 0.0
@@ -81,7 +82,7 @@ class Config:
     max_saturation_fraction: float = 0.05
     cellpose_model: str = "cyto2"
     cellpose_diameter: float = 0.0
-    cellpose_gpu: bool = False
+    cellpose_gpu: bool = True  # legacy alias; synced into dual_use_gpu
     cellpose_flow_threshold: float = 0.4
     cellpose_cellprob_threshold: float = 0.0
     ring_width: int = 3
@@ -124,11 +125,29 @@ def _coerce_value(field_type: Any, value: Any) -> Any:
     return value
 
 
+def _cuda_available() -> bool:
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
 def load_config(path: str | Path | None = None, overrides: dict[str, Any] | None = None) -> Config:
-    """Load config from YAML, then apply optional CLI/runtime overrides."""
+    """Load config from YAML, then apply optional CLI/runtime overrides.
+
+    GPU policy
+    ----------
+    - Default / auto: if CUDA is available and ``dual_auto_gpu`` is True, GPU is ON.
+    - Explicit override wins: ``dual_use_gpu`` or legacy ``cellpose_gpu`` in overrides.
+    - Set ``dual_use_gpu: false`` (and optionally ``dual_auto_gpu: false``) to force CPU.
+    """
     cfg = Config()
     config_path = Path(path) if path else DEFAULT_CONFIG_PATH
     type_map = _resolve_field_types()
+    yaml_keys: set[str] = set()
+    override_keys: set[str] = set(overrides.keys()) if overrides else set()
 
     if config_path.is_file():
         with open(config_path, encoding="utf-8") as f:
@@ -138,6 +157,7 @@ def load_config(path: str | Path | None = None, overrides: dict[str, Any] | None
         for key, value in raw.items():
             if key not in type_map:
                 continue
+            yaml_keys.add(key)
             setattr(cfg, key, _coerce_value(type_map[key], value))
 
     if overrides:
@@ -160,6 +180,20 @@ def load_config(path: str | Path | None = None, overrides: dict[str, Any] | None
             cfg.dual_cellprob_threshold = float(cfg.cellpose_cellprob_threshold)
         if "minimum_ring_pixels" in overrides and "minimum_and_pixels" not in overrides:
             cfg.minimum_and_pixels = int(cfg.minimum_ring_pixels)
+
+    # Auto-enable GPU when CUDA is free and user did not explicitly force CPU.
+    explicit_gpu = ("dual_use_gpu" in override_keys) or ("cellpose_gpu" in override_keys)
+    if cfg.dual_auto_gpu and not explicit_gpu and _cuda_available():
+        # YAML may still say false from older configs; auto-on is intentional.
+        if not cfg.dual_use_gpu:
+            cfg.dual_use_gpu = True
+        cfg.cellpose_gpu = True
+    else:
+        # Keep legacy alias in sync for UI reporting
+        if "dual_use_gpu" in override_keys or "dual_use_gpu" in yaml_keys:
+            cfg.cellpose_gpu = bool(cfg.dual_use_gpu)
+        elif "cellpose_gpu" in override_keys:
+            cfg.dual_use_gpu = bool(cfg.cellpose_gpu)
 
     _validate_config(cfg)
     return cfg

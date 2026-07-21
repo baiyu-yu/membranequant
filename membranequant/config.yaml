@@ -5,7 +5,9 @@
 # ---------- DualCellQuant preprocess ----------
 dual_bg_enable: true
 dual_bg_radius: 50
-dual_bg_mode: rolling          # rolling | dark_subtract | manual
+# rolling = skimage rolling_ball (very slow on large images; Dual may run it ~4×/field)
+# dark_subtract = fast percentile dark-level subtract (recommended for speed)
+dual_bg_mode: dark_subtract    # rolling | dark_subtract | manual
 dual_bg_dark_pct: 5.0
 dual_norm_enable: false        # keep false for absolute intensity comparisons
 dual_norm_method: z-score
@@ -14,10 +16,11 @@ dual_norm_method: z-score
 dual_seg_source: target        # target=EGFP (recommended) | reference=DiI
 dual_seg_channel: 0            # 0=gray, 1=R, 2=G, 3=B (single-channel TIF → 0)
 dual_measure_channel: gray
-dual_diameter: 0               # 0 = auto
+dual_diameter: 0               # 0 = auto (slower: size estimation pass). Prefer fixed px if known.
 dual_flow_threshold: 0.4
 dual_cellprob_threshold: 0.0
-dual_use_gpu: false
+dual_use_gpu: true             # Cellpose stage only; post-seg is CPU
+dual_auto_gpu: true            # if CUDA available, turn GPU on even if dual_use_gpu was false
 dual_drop_edge_cells: true
 dual_inside_fraction_min: 0.9
 dual_edge_margin_pct: 0.0

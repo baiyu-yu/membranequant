@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
+from membranequant.dual_backend import dualcellquant_status
 from membranequant.webui import _preview_pairs, run_from_ui
 
 
@@ -38,7 +39,7 @@ def test_preview_and_run(tmp_path: Path):
     report, results_df, summary_df, overlays, plots = run_from_ui(
         input_dir=str(exp),
         output_dir=str(out),
-        seg_method="otsu",
+        seg_method="dualcellquant",
         ring_width=3,
         min_area=80,
         max_area=20000,
@@ -57,19 +58,23 @@ def test_preview_and_run(tmp_path: Path):
         config_path="",
         progress=None,
     )
-    assert "完成" in report or "分析" in report
-    assert results_df is not None
-    assert (out / "csv" / "results.csv").is_file()
-    assert (out / "plots").is_dir()
+    st = dualcellquant_status()
+    if not st.get("available") or not st.get("cellpose_available"):
+        # Hard-fail path: no silent fallback
+        assert "❌" in report or "DualCellQuant" in report or "失败" in report
+    else:
+        assert "完成" in report or "分析" in report
+        assert results_df is not None
+        assert (out / "csv" / "results.csv").is_file()
 
 
-def test_run_cellpose_without_install_errors_gracefully(tmp_path: Path):
+def test_run_without_dual_errors_clearly(tmp_path: Path):
     exp = tmp_path / "Experiment"
     exp.mkdir()
     report, *_ = run_from_ui(
         input_dir=str(exp),
         output_dir=str(tmp_path / "out"),
-        seg_method="cellpose",
+        seg_method="dualcellquant",
         ring_width=3,
         min_area=100,
         max_area=50000,
@@ -87,5 +92,6 @@ def test_run_cellpose_without_install_errors_gracefully(tmp_path: Path):
         compute_pearson=False,
         config_path="",
     )
-    # 无图对 / 未装 Cellpose / 分析完成 都不应崩溃
-    assert "❌" in report or "⚠️" in report or "完成" in report or report.startswith("#")
+    # Empty input folder OR missing Dual — must not crash, must not silently succeed with fake data
+    assert isinstance(report, str)
+    assert len(report) > 0

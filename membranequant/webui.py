@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from membranequant.config import Config, load_config
-from membranequant.dual_backend import dualcellquant_status
+from membranequant.dual_backend import describe_runtime, dualcellquant_status
 from membranequant.io import scan_with_report
 from membranequant.main import run_pipeline
 
@@ -200,36 +200,65 @@ def run_from_ui(
         else None
     )
     overrides: dict[str, Any] = {
-        "segmentation_method": seg_method,
+        "segmentation_method": "dualcellquant",
         "ring_width": int(ring_width),
         "minimum_cell_area": int(min_area),
         "maximum_cell_area": int(max_area),
         "minimum_red_coverage": float(min_red_cov),
         "rolling_ball_radius": int(rolling_ball),
+        "dual_bg_radius": int(rolling_ball),
         "gaussian_sigma": float(gaussian_sigma),
         "enable_denoise": bool(enable_denoise),
         "segmentation_channel": seg_channel,
         "cellpose_model": cellpose_model or "cyto2",
         "cellpose_diameter": float(cellpose_diameter),
+        "dual_diameter": float(cellpose_diameter),
         "cellpose_gpu": bool(cellpose_gpu),
+        "dual_use_gpu": bool(cellpose_gpu),
+        "dual_auto_gpu": False,  # respect checkbox exactly
         "cellpose_flow_threshold": float(cellpose_flow_threshold),
+        "dual_flow_threshold": float(cellpose_flow_threshold),
         "cellpose_cellprob_threshold": float(cellpose_cellprob_threshold),
+        "dual_cellprob_threshold": float(cellpose_cellprob_threshold),
         "save_overlay": bool(save_overlay),
         "save_mask": bool(save_mask),
         "save_graphpad": bool(save_graphpad),
         "compute_pearson": bool(compute_pearson),
     }
+    # legacy UI still exposes seg_method; Dual path ignores non-dual choices
+    _ = seg_method
 
     try:
         cfg = load_config(cfg_file, overrides=overrides)
     except Exception as exc:
         return f"❌ **参数配置无效**：{exc}", empty_df, empty_df, empty_gallery, empty_gallery
 
-    st = dualcellquant_status()
-    if not st["available"]:
-        _log(f"DualCellQuant 状态：{st['message']}（已启用内置降级模式）")
+    rt = describe_runtime(cfg)
+    if not rt.get("available") or not rt.get("cellpose_available"):
+        return (
+            "❌ **DualCellQuant / Cellpose 未就绪（已取消静默降级）**\n\n"
+            f"{rt.get('message')}\n\n"
+            "请在运行分析的机器上安装：\n"
+            '```\npip install "git+https://github.com/fuji3to4/DualCellQuant.git"\n'
+            "pip install cellpose torch\n"
+            "# GPU: 安装与驱动匹配的 CUDA 版 PyTorch\n```",
+            empty_df,
+            empty_df,
+            empty_gallery,
+            empty_gallery,
+        )
+    _log(f"Runtime: {rt['summary']}")
+    _log(f"DualCellQuant 状态：{rt['message']}")
+    if not rt.get("will_use_gpu"):
+        _log(
+            "⚠️ Cellpose 未走 GPU：GPU 占用会很低。请勾选「使用 GPU 加速」，"
+            "并确认 torch.cuda.is_available()=True。"
+        )
     else:
-        _log(f"DualCellQuant 状态：{st['message']}")
+        _log(
+            f"✅ Cellpose 将使用 GPU（{rt.get('cuda_device_name') or 'CUDA'}）。"
+            " 注意：EDT / mask / 背景扣除 / 定量仍是 CPU，GPU 不会全程打满。"
+        )
 
     def on_progress(message: str, fraction: float) -> None:
         _log(f"[{fraction * 100:5.1f}%] {message}")
@@ -245,7 +274,7 @@ def run_from_ui(
     try:
         _log(f"输入目录：{in_path}")
         _log(f"输出目录：{out_path}")
-        _log(f"分割方法：{cfg.segmentation_method}")
+        _log(f"Backend：DualCellQuant | dual_use_gpu={cfg.dual_use_gpu} | bg_mode={cfg.dual_bg_mode}")
         results_path = run_pipeline(
             in_path.resolve(), out_path.resolve(), cfg, progress=on_progress
         )
@@ -260,28 +289,17 @@ def run_from_ui(
                 top = results_df["QC_Reason"].fillna("").value_counts().head(5)
                 qc_reasons = "\n".join(f"- `{k}`: {v} 个" for k, v in top.items() if k)
 
-        seg_names = {
-            "otsu": "Otsu 阈值法",
-            "watershed_distance": "距离变换+分水岭",
-            "watershed_gradient": "梯度+分水岭",
-            "hminima_watershed": "H-minima+分水岭",
-            "morphological_opening": "形态学开运算",
-            "combined_markers": "距离+梯度双重markers",
-            "cellpose": "Cellpose 深度学习",
-        }
-        method_name = seg_names.get(cfg.segmentation_method, cfg.segmentation_method)
-        if cfg.segmentation_method == "cellpose":
-            seg_info = f"{method_name} (模型: `{cfg.cellpose_model}`)"
-            st = cellpose_status()
-            if cfg.cellpose_gpu and st.get("cuda_available"):
-                hardware_info = "GPU (CUDA 加速)"
-            elif cfg.cellpose_gpu:
-                hardware_info = "CPU (配置了GPU，但CUDA不可用，已自动退回CPU)"
-            else:
-                hardware_info = "CPU (已禁用GPU)"
+        rt_done = describe_runtime(cfg)
+        seg_info = "DualCellQuant → Cellpose-SAM (`cpdino`)"
+        hardware_info = rt_done["hardware"]
+        if rt_done.get("will_use_gpu"):
+            hardware_info += "（仅分割阶段；EDT/mask/定量为 CPU）"
+        backend_col = ""
+        if not results_df.empty and "Backend" in results_df.columns:
+            backends = sorted({str(x) for x in results_df["Backend"].dropna().unique()})
+            backend_col = ", ".join(backends) if backends else "n/a"
         else:
-            seg_info = method_name
-            hardware_info = "CPU (传统方法)"
+            backend_col = "dualcellquant (expected)"
 
         warn_qc = ""
         if n_rows > 0 and n_pass == 0:
@@ -289,7 +307,7 @@ def run_from_ui(
                 "\n### ⚠️ 警告：没有细胞通过质控\n\n"
                 "常见原因：\n"
                 "1. 绿色通道读成 0（RGB 导出时曾只取 R 平面，现已修复，请**重新分析**）\n"
-                "2. 最低 Red Coverage / 膜环像素阈值过严 — 可在左侧略调低\n"
+                "2. 最低 Red Coverage / AND 像素阈值过严 — 可在左侧略调低\n"
             )
             if qc_reasons:
                 warn_qc += "\n本次失败原因统计：\n" + qc_reasons + "\n"
@@ -300,8 +318,11 @@ def run_from_ui(
             f"| 结果文件 | `{results_path}` |\n"
             f"| 检出细胞数 | **{n_rows}** 行（每个细胞一行） |\n"
             f"| 通过质控 | **{n_pass}** 个细胞 |\n"
-            f"| 分割方法 | {seg_info} |\n"
+            f"| 图像分析后端 | {seg_info} |\n"
+            f"| results Backend 列 | `{backend_col}` |\n"
             f"| 运行硬件 | {hardware_info} |\n"
+            f"| GPU 请求 / CUDA | `{cfg.dual_use_gpu}` / `{rt_done.get('cuda_available')}` |\n"
+            f"| 背景模式 | `{cfg.dual_bg_mode}`（rolling 很慢；dark_subtract 快） |\n"
             f"| 输出文件夹 | `{out_path.resolve()}` |\n"
             f"{warn_qc}\n"
             f"**输出说明：**\n"
@@ -310,7 +331,7 @@ def run_from_ui(
             f"- `csv/graphpad_*.csv`：GraphPad 宽表（多指标）\n"
             f"- `overlays/`：分割叠加图 + 红绿共定位散点图\n"
             f"- `plots/`：📊 **300 dpi 统计图（可直接放 PPT）**\n"
-            f"- `masks/`：标签图；`qc/`：剔除原因\n\n"
+            f"- `masks/`：标签图；`qc/`：剔除原因；`logs/pipeline.log`：分阶段耗时\n\n"
             f"💡 也可用可视化前端：`python membranequant/visualizer_app.py` 上传 results.csv 出图。\n\n"
             f"### 运行日志（末尾）\n```\n" + "\n".join(logs[-80:]) + "\n```"
         )
@@ -339,37 +360,69 @@ def build_app(config_path: Path | None = None):
 
     cfg = _default_cfg(config_path)
     cp = dualcellquant_status()
-    if cp["available"]:
-        if cp.get("cuda_available"):
-            cuda_status = " 🚀 **(CUDA GPU加速已启用)**"
+    rt0 = describe_runtime(cfg)
+    if cp["available"] and cp.get("cellpose_available"):
+        if rt0.get("will_use_gpu"):
+            cuda_status = (
+                f"\n\n🚀 **将使用 GPU 做 Cellpose 分割**（{cp.get('cuda_device_name') or 'CUDA'}）。"
+                " 后处理（EDT / mask / 定量）仍是 CPU，任务管理器里 GPU 不会全程 100%。"
+            )
+        elif cp.get("cuda_available"):
+            cuda_status = (
+                "\n\n⚠️ **检测到 CUDA 可用，但当前配置未启用 GPU**。"
+                "请勾选下方「使用 GPU 加速」，否则会很慢且 GPU 空闲。"
+            )
         else:
             cuda_status = (
-                "\n\n⚠️ **检测到 CUDA 未启用**：当前 PyTorch 为 CPU 模式。"
+                "\n\n⚠️ **CUDA 不可用**：当前 PyTorch 为 CPU 模式"
+                "（`torch.cuda.is_available()=False`）。“有 DualCellQuant”≠ 已用 GPU。"
             )
-        cp_banner = f"✅ **DualCellQuant 已准备就绪**（版本: {cp.get('version') or '最新'}）{cuda_status}。"
+        cp_banner = (
+            f"✅ **DualCellQuant 已安装**（版本: {cp.get('version') or '?'}；"
+            f"分割模型: **{cp.get('model_name', 'cpdino')} / Cellpose-SAM**）"
+            f"{cuda_status}\n\n"
+            f"`{rt0['summary']}`"
+        )
+    elif cp["available"]:
+        cp_banner = (
+            f"⚠️ **DualCellQuant 已装但 Cellpose/torch 不可用**：{cp.get('message')}\n\n"
+            "分析会**直接失败**（已取消静默降级）。"
+        )
     else:
         cp_banner = (
-            "⚪ **DualCellQuant 未安装** — 请运行 `pip install \"git+https://github.com/fuji3to4/DualCellQuant.git\"`。"
+            "❌ **DualCellQuant 未安装** — 分析会直接失败（已取消静默降级）。\n"
+            '请运行 `pip install "git+https://github.com/fuji3to4/DualCellQuant.git"` 并安装 cellpose + torch。'
         )
+
+    # Prefer GPU when CUDA is present
+    gpu_default = bool(cfg.dual_use_gpu)
+    if cp.get("cuda_available") and cfg.dual_auto_gpu:
+        gpu_default = True
 
     with gr.Blocks(title="MembraneQuant 膜定位定量") as demo:
         gr.Markdown(
             f"""
 # MembraneQuant · 膜定位定量工具
 
+{cp_banner}
+
 用于分析 **EGFP 标记蛋白的细胞膜定位**，并用 **DiI 膜染色** 做质量检查。
 
-### 设计原则（请先读这三句）
+### 架构（当前）
 
-1. **细胞边界** 由 **绿色 EGFP**（或 EGFP+DiI 合成）分割得到 — **不要**用 DiI 单独定边界（DiI 容易染色不完整）。
-2. **膜区域** 是细胞边界向内收缩固定宽度得到的 **几何膜环**（例如 3 像素），不是对 DiI 做阈值。
-3. **DiI（红）** 只用于 **质控**：检查膜环上是否真有膜染色（Red Coverage）。
+1. **图像分析后端固定为 DualCellQuant**（Cellpose-SAM `cpdino` → EDT 径向膜区 → mask → T/R 定量）。
+2. **只有分割阶段吃 GPU**；背景扣除 / EDT / 定量是 CPU。所以“有 CUDA”≠“GPU 打满”。
+3. Dual 用的是 **cpdino（比经典 cyto2 重得多）**；`dual_bg_mode=rolling` 时 rolling-ball 会极慢。
+
+### 设计原则
+
+1. **细胞边界** 主要由 **绿色 EGFP** 分割得到。
+2. **膜区域** 由 Dual 的 **EDT 径向百分比**（默认 85–100%）得到。
+3. **DiI（红）** 参与 mask / T/R 与质控。
 
 ### 分析流程（自动）
 
-读取目录 → 自动配对红/绿图 → 背景校正 → 细胞分割 → 生成膜环/胞质 → 测量强度 → 质控 → 导出 CSV / 叠加图
-
-{cp_banner}
+读取目录 → 配对红/绿 → Dual 分割 → 径向膜 ROI → mask → 定量 → 质控 → CSV / 叠加图
 """
         )
 
@@ -490,9 +543,13 @@ def build_app(config_path: Path | None = None):
                         ),
                     )
                     cellpose_gpu = gr.Checkbox(
-                        label="使用 GPU 加速",
-                        value=bool(cfg.cellpose_gpu),
-                        info="有 NVIDIA GPU 且已装好 CUDA 版 PyTorch 时可勾选，会快很多；没有 GPU 请不要勾。",
+                        label="使用 GPU 加速（Dual Cellpose 分割）",
+                        value=gpu_default,
+                        info=(
+                            "必须勾选且 torch.cuda.is_available()=True 才会用 GPU。"
+                            "前端显示“CUDA 可用”不等于已加速。"
+                            "仅分割阶段用 GPU；后处理是 CPU。"
+                        ),
                     )
                     cellpose_flow_threshold = gr.Slider(
                         minimum=0.0,
