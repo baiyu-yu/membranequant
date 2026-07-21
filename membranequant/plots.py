@@ -56,18 +56,76 @@ METRIC_LABELS = {
 }
 
 
-def _pass_df(results_df: pd.DataFrame) -> pd.DataFrame:
+def _remove_outliers_iqr(df: pd.DataFrame, metric: str, factor: float = 2.5) -> pd.DataFrame:
+    """按 Condition 分组（或全局）排除 IQR 极端离群点，防止异常点影响 scale 和均值。"""
+    if df.empty or metric not in df.columns:
+        return df
+
+    group_col = "Condition" if "Condition" in df.columns else None
+
+    def get_group_mask(sub: pd.Series) -> pd.Series:
+        s = sub.dropna()
+        if len(s) < 4:
+            return pd.Series(True, index=sub.index)
+        q1 = s.quantile(0.25)
+        q3 = s.quantile(0.75)
+        iqr = q3 - q1
+        if iqr <= 1e-9:
+            std = s.std()
+            mean = s.mean()
+            if std <= 1e-9:
+                return pd.Series(True, index=sub.index)
+            lower = mean - factor * std
+            upper = mean + factor * std
+        else:
+            lower = q1 - factor * iqr
+            upper = q3 + factor * iqr
+
+        valid_indices = s[(s >= lower) & (s <= upper)].index
+        return sub.index.isin(valid_indices) | sub.isna()
+
+    if group_col and df[group_col].nunique() > 0:
+        masks = []
+        for _, group_df in df.groupby(group_col):
+            masks.append(get_group_mask(group_df[metric]))
+        if masks:
+            combined_mask = pd.concat(masks).reindex(df.index, fill_value=True)
+            return df[combined_mask].copy()
+
+    mask = get_group_mask(df[metric])
+    return df[mask].copy()
+
+
+def _pass_df(results_df: pd.DataFrame, metric: str | list[str] | None = None) -> pd.DataFrame:
     if results_df is None or results_df.empty:
         return pd.DataFrame()
     df = results_df.copy()
-    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.replace([np.inf, -np.inf], np.nan).infer_objects(copy=False)
     if "QC" in df.columns:
         df = df[df["QC"] == "pass"].copy()
-    # 排除异常富集比（旧指标或 Dual 富集）
-    if "EdgeCenterRatio" in df.columns:
-        df = df[df["EdgeCenterRatio"] <= 10].copy()
-    if "Enrichment_Membrane_vs_Whole" in df.columns:
-        df = df[df["Enrichment_Membrane_vs_Whole"] <= 20].copy()
+
+    # 排除极端异常的比值 / 富集指标（除以零或近零背景产生的数值噪点）
+    ratio_cols = [
+        "Ratio_T_over_R",
+        "RatioOfMeans_T_R",
+        "Enrichment_Membrane_vs_Whole",
+        "M/C_DiI",
+        "M/C",
+        "MEI",
+        "EdgeCenterRatio",
+    ]
+    for col in ratio_cols:
+        if col in df.columns:
+            # 比值通常处于 (0, 50] 范围，> 50 或 <= 0 为除零/背景计算异常
+            mask = df[col].isna() | ((df[col] > 0) & (df[col] <= 50.0) & np.isfinite(df[col]))
+            df = df[mask].copy()
+
+    if metric:
+        metrics = [metric] if isinstance(metric, str) else metric
+        for m in metrics:
+            if m in df.columns:
+                df = _remove_outliers_iqr(df, m)
+
     return df
 
 
@@ -296,7 +354,7 @@ def plot_metric_boxplot(
 ) -> None:
     """箱线图 + 单细胞散点。"""
     ensure_dir(output_path.parent)
-    df = _ensure_condition(_pass_df(results_df))
+    df = _ensure_condition(_pass_df(results_df, metric=metric))
     if df.empty or metric not in df.columns:
         _empty_fig(output_path, f"无指标 {metric}")
         return
@@ -372,7 +430,7 @@ def plot_metric_violin(
 ) -> None:
     """小提琴图（发表常用）。"""
     ensure_dir(output_path.parent)
-    df = _ensure_condition(_pass_df(results_df))
+    df = _ensure_condition(_pass_df(results_df, metric=metric))
     if df.empty or metric not in df.columns:
         _empty_fig(output_path, f"无指标 {metric}")
         return
@@ -753,10 +811,15 @@ def plot_coloc_dashboard(
 ) -> None:
     """共定位三联图：Manders M1 / Pearson / MEI。"""
     ensure_dir(output_path.parent)
+    df = _ensure_condition(_pass_df(results_df))
+    if df.empty:
+        _empty_fig(output_path, "无数据")
+        return
+
     dual_metrics = [m for m in ("Ratio_T_over_R", "RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole") if m in df.columns]
     legacy_metrics = [m for m in ("Manders_M1", "PearsonWhole", "MEI") if m in df.columns]
     metrics = dual_metrics if dual_metrics else legacy_metrics
-    if df.empty or not metrics:
+    if not metrics:
         _empty_fig(output_path, "无共定位/膜富集指标")
         return
 
@@ -765,8 +828,9 @@ def plot_coloc_dashboard(
         axes = [axes]
 
     for ax, metric in zip(axes, metrics):
+        clean_df = _remove_outliers_iqr(df, metric)
         sns.boxplot(
-            data=df.dropna(subset=[metric]),
+            data=clean_df.dropna(subset=[metric]),
             x="Condition",
             y=metric,
             hue="Condition",
@@ -776,7 +840,7 @@ def plot_coloc_dashboard(
             legend=False,
         )
         sns.stripplot(
-            data=df.dropna(subset=[metric]),
+            data=clean_df.dropna(subset=[metric]),
             x="Condition",
             y=metric,
             ax=ax,
@@ -804,12 +868,11 @@ def build_summary_from_results(
     filter_qc: bool = True,
 ) -> pd.DataFrame:
     """从 results.csv 构建 summary（可视化前端用）。"""
-    df = results_df.copy().replace([np.inf, -np.inf], np.nan)
-    if filter_qc and "QC" in df.columns:
-        df = df[df["QC"] == "pass"]
-    # 汇总计算时全局自动排除 EdgeCenterRatio > 10 的噪点异常细胞，确保均值不受偏离影响
-    if "EdgeCenterRatio" in df.columns:
-        df = df[df["EdgeCenterRatio"] <= 10]
+    if filter_qc:
+        df = _pass_df(results_df, metric=metric)
+    else:
+        df = results_df.copy().replace([np.inf, -np.inf], np.nan).infer_objects(copy=False)
+
     if group_col not in df.columns:
         df = _ensure_condition(df)
         group_col = "Condition"
@@ -851,9 +914,8 @@ def generate_all_plots(
     plots_dir = ensure_dir(Path(output_dir) / "plots")
     saved: list[Path] = []
 
-    # If summary empty or wrong metric, rebuild
-    if summary_df is None or summary_df.empty or "Mean_M/C" not in summary_df.columns:
-        summary_df = build_summary_from_results(results_df, metric=metric)
+    # 重新从过滤极极端异常值后的 results_df 构建 summary，确保柱状图均值不被离群点污染
+    summary_df = build_summary_from_results(results_df, metric=metric)
 
     jobs: list[tuple[str, Any]] = [
         ("01_metric_bar.png", lambda p: plot_mc_comparison_bar(
@@ -903,7 +965,7 @@ def plot_batch_effect_comparison(
     import seaborn as sns
 
     ensure_dir(output_path.parent)
-    df = _ensure_condition(_pass_df(results_df))
+    df = _ensure_condition(_pass_df(results_df, metric=metric))
     if df.empty or metric not in df.columns:
         _empty_fig(output_path, f"无指标 {metric}")
         return

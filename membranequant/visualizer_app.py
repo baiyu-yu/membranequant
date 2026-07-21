@@ -67,7 +67,7 @@ def _load_csv(file_obj) -> pd.DataFrame:
         raise ValueError("请先上传 results.csv")
     path = getattr(file_obj, "name", None) or str(file_obj)
     df = pd.read_csv(path)
-    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.replace([np.inf, -np.inf], np.nan).infer_objects(copy=False)
     return df
 
 

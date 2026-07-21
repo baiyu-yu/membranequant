@@ -142,3 +142,56 @@ def test_pipeline_hard_fails_without_dual(tmp_path: Path, monkeypatch):
     cfg = Config(dual_use_gpu=False, dual_auto_gpu=False, save_overlay=False, save_mask=False)
     with pytest.raises(ImportError):
         main.run_pipeline(tmp_path, tmp_path / "out", cfg)
+
+
+def test_generate_all_plots_and_outlier_filter(tmp_path: Path):
+    import pandas as pd
+    from membranequant.plots import generate_all_plots, build_summary_from_results
+
+    # Generate synthetic results dataframe with extreme ratio outliers
+    rows = []
+    conditions = ["104d1", "104d2", "104e1", "wd1", "we1"]
+    cell_id = 1
+    for cond in conditions:
+        exp = cond[:3] if cond.startswith("104") else cond[0]
+        drug = cond[3] if cond.startswith("104") else cond[1]
+        grp = cond[4] if cond.startswith("104") else cond[2]
+        for i in range(20):
+            val = 1.5 + np.random.randn() * 0.2
+            # Insert extreme division-by-zero ratio outliers in wd1
+            if cond == "wd1" and i == 0:
+                val = 3.5e13
+            rows.append({
+                "Image": f"{cond}_img1.tif",
+                "Experiment": exp,
+                "Drug": drug,
+                "Group": grp,
+                "Condition": cond,
+                "CellID": cell_id,
+                "Ratio_T_over_R": val,
+                "RatioOfMeans_T_R": val,
+                "Enrichment_Membrane_vs_Whole": val if val < 100 else 1000,
+                "MembraneGreen": 100.0,
+                "MembraneRed": 50.0,
+                "CytoGreen_DiI": 60.0,
+                "Area": 500,
+                "QC": "pass",
+                "EdgeCenterRatio": 1.5,
+            })
+            cell_id += 1
+
+    df = pd.DataFrame(rows)
+    summary_df = build_summary_from_results(df, metric="Ratio_T_over_R")
+    
+    # Check that wd1 mean is not 3.5e13 / 20 = 1.75e12
+    wd1_summary = summary_df[summary_df["Condition"] == "wd1"]
+    assert not wd1_summary.empty
+    assert wd1_summary["Mean"].iloc[0] < 10.0
+
+    # Generate all plots and verify 08_coloc_dashboard and all other 11 plots are created
+    out_dir = tmp_path / "plot_test"
+    saved = generate_all_plots(df, summary_df, out_dir, metric="Ratio_T_over_R")
+    assert len(saved) == 11
+    coloc_file = out_dir / "plots" / "08_coloc_dashboard.png"
+    assert coloc_file.is_file()
+

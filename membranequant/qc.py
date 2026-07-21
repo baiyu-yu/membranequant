@@ -40,7 +40,7 @@ def apply_qc(rows: list[dict[str, Any]], cfg: Config) -> list[dict[str, Any]]:
                 reasons.append("red_coverage_low")
 
         ratio = row.get("Ratio_T_over_R", row.get("RatioOfMeans_T_R"))
-        if ratio is None or (isinstance(ratio, float) and np.isnan(ratio)):
+        if ratio is None or not isinstance(ratio, (int, float)) or np.isnan(ratio) or np.isinf(ratio) or ratio <= 0 or ratio > 50:
             reasons.append("invalid_ratio")
 
         row = dict(row)

@@ -96,6 +96,9 @@ def write_summary_csv(df: pd.DataFrame, path: Path, metric: str = "Ratio_T_over_
     """Summary of one metric for QC-pass cells, by Experiment + Drug + Group + Condition."""
     ensure_dir(path.parent)
     passed = df[df["QC"] == "pass"].copy() if "QC" in df.columns else df.copy()
+    passed = passed.replace([np.inf, -np.inf], np.nan).infer_objects(copy=False)
+    if metric in ("Ratio_T_over_R", "RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole", "M/C_DiI", "M/C", "MEI"):
+        passed = passed[(passed[metric].isna()) | ((passed[metric] > 0) & (passed[metric] <= 50.0))].copy()
 
     # Prefer Dual T/R ratio; fall back to enrichment
     if metric not in passed.columns or passed[metric].isna().all():
@@ -176,7 +179,9 @@ def write_multi_metric_summary(df: pd.DataFrame, path: Path) -> pd.DataFrame:
         if metric not in passed.columns:
             continue
         for cond, sub in passed.groupby("Condition", dropna=False):
-            vals = sub[metric].replace([np.inf, -np.inf], np.nan).dropna()
+            vals = sub[metric].replace([np.inf, -np.inf], np.nan).infer_objects(copy=False).dropna()
+            if metric in ("Ratio_T_over_R", "RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole", "M/C_DiI", "M/C", "MEI"):
+                vals = vals[(vals > 0) & (vals <= 50.0)]
             if vals.empty:
                 continue
             n = int(vals.count())

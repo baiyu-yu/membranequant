@@ -91,7 +91,7 @@ def _df_for_gradio(df: pd.DataFrame | None, max_rows: int = 200) -> pd.DataFrame
         return pd.DataFrame()
     out = df.head(max_rows).copy()
     # Gradio + NaN can confuse some versions; keep numbers finite for display
-    out = out.replace([np.inf, -np.inf], np.nan)
+    out = out.replace([np.inf, -np.inf], np.nan).infer_objects(copy=False)
     return out
 
 
