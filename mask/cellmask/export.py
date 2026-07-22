@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import struct
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -72,14 +73,31 @@ def export_item(
     export_colored_mask_png(labels_out, colored_mask_path)
     paths["mask_colored"] = colored_mask_path
 
-    # 2. 导出 Fiji / ImageJ 直接拖拽可用的 ROI.zip 文件
+    # 2. 导出 Fiji / ImageJ 直接拖拽可用的 ROI.zip 文件 (严格保存在 rois/ 子目录中，使用 ZIP_STORED)
     rois_dir = out_dir / "rois"
-    roi_zip_path = rois_dir / f"{stem}_rois.zip"
+    roi_zip_path_sub = rois_dir / f"{stem}_rois.zip"
     try:
-        export_imagej_rois_zip(labels_out, roi_zip_path)
-        paths["rois_zip"] = roi_zip_path
+        exported_zip = export_imagej_rois_zip(labels_out, roi_zip_path_sub)
+        if exported_zip and exported_zip.exists():
+            paths["rois_zip"] = exported_zip
+            print(f"  [export] 已导出 ImageJ ROI: {exported_zip}")
     except Exception as e:
         print(f"[warn] ImageJ ROI.zip 导出失败 {stem}: {e}")
+
+    # 3. 导出 Cellpose 原生 _seg.npy 文件
+    seg_npy_path = out_dir / f"{stem}_seg.npy"
+    try:
+        np.save(
+            str(seg_npy_path),
+            {
+                "masks": mask_arr,
+                "filename": str(item.red_path) if item.red_path else item.image_id,
+                "chan_choose": [0, 0],
+            },
+        )
+        paths["seg_npy"] = seg_npy_path
+    except Exception as e:
+        print(f"[warn] _seg.npy 导出失败 {stem}: {e}")
 
     if save_overlay:
         try:
@@ -212,35 +230,29 @@ def export_all(
 
 def _build_imagej_roi_bytes(name: str, contour: np.ndarray) -> bytes:
     """构建 ImageJ 二进制 Polygon ROI 文件内容。contour 为 Nx2 [y, x] 坐标。"""
-    import sys
-
     ys = contour[:, 0]
     xs = contour[:, 1]
     top, left = int(np.floor(ys.min())), int(np.floor(xs.min()))
     bottom, right = int(np.ceil(ys.max())), int(np.ceil(xs.max()))
 
-    rel_xs = (xs - left).round().astype(np.int16)
-    rel_ys = (ys - top).round().astype(np.int16)
+    rel_xs = (xs - left).round().astype(np.float32).astype(np.int16)
+    rel_ys = (ys - top).round().astype(np.float32).astype(np.int16)
     n_pts = len(rel_xs)
 
+    # 64 字节 ImageJ ROI Header (全部使用大端字节序 >)
     header = bytearray(64)
     struct.pack_into(">4s", header, 0, b"Iout")
-    struct.pack_into(">H", header, 4, 227)
-    struct.pack_into(">H", header, 6, 0)
-    struct.pack_into(">h", header, 8, top)
-    struct.pack_into(">h", header, 10, left)
-    struct.pack_into(">h", header, 12, bottom)
-    struct.pack_into(">h", header, 14, right)
-    struct.pack_into(">H", header, 18, n_pts)
+    struct.pack_into(">H", header, 4, 227)     # version 227
+    struct.pack_into(">H", header, 6, 0)       # type 0 = Polygon
+    struct.pack_into(">h", header, 8, top)     # top
+    struct.pack_into(">h", header, 10, left)   # left
+    struct.pack_into(">h", header, 12, bottom) # bottom
+    struct.pack_into(">h", header, 14, right)  # right
+    struct.pack_into(">H", header, 16, n_pts)  # nCoordinates (必须在偏移量 16!)
 
-    if sys.byteorder == "little":
-        rel_xs_be = rel_xs.byteswap()
-        rel_ys_be = rel_ys.byteswap()
-        x_bytes = rel_xs_be.tobytes()
-        y_bytes = rel_ys_be.tobytes()
-    else:
-        x_bytes = rel_xs.tobytes()
-        y_bytes = rel_ys.tobytes()
+    # ImageJ 要求坐标数据为大端 int16
+    x_bytes = rel_xs.astype(">i2").tobytes()
+    y_bytes = rel_ys.astype(">i2").tobytes()
 
     return bytes(header) + x_bytes + y_bytes
 
@@ -257,13 +269,15 @@ def export_imagej_rois_zip(labels: np.ndarray, zip_path: Path) -> Path | None:
     zip_path = Path(zip_path)
     zip_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with zipfile.ZipFile(str(zip_path), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(str(zip_path), "w", compression=zipfile.ZIP_STORED) as zf:
         for idx, cid in enumerate(unique_ids, start=1):
             mask = labels == cid
             contours = find_contours(mask.astype(float), 0.5)
             if not contours:
                 continue
             c = max(contours, key=len)
+            if len(c) < 3:
+                continue
             roi_bytes = _build_imagej_roi_bytes(f"Cell-{cid}", c)
             roi_filename = f"{idx:03d}-cell{cid:04d}.roi"
             zf.writestr(roi_filename, roi_bytes)
