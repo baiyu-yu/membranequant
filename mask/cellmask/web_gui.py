@@ -1,12 +1,11 @@
-"""Web 前端交互界面：基于 Python 标准库 http.server 提供 REST API 与现代 Canvas Web 界面。
+"""Web 前端交互界面：极速响应版 REST API + Canvas 交互。
 
-功能特色：
-1. 图像平移/缩放：鼠标滚轮放大缩小、按住拖拽平移。
-2. 消除细胞边框（合并）：点击或划过两个细胞的交界边框，消除分割线并合并细胞。
-3. 点击与侧边栏勾选：点击 Canvas 细胞或在侧边栏 Checkbox 勾选/取消勾选切换保留/剔除。
-4. 快速筛选与批量操作：剔除触边细胞、剔除标尺区、全选保留、重置。
-5. 通道与显示控制：红/绿/Merge 通道切换，Mask 透明度调节，ID/轮廓/标尺框显隐。
-6. 一键导出：导出当前或导出全部，打包生成 masks, overlays, meta 等文件。
+性能与体验优化：
+1. 0 延迟本地即时更新：点击/勾选取消细胞瞬间完成（0ms 延迟），无网络卡顿。
+2. 背景图与轮廓缓存：避免重复生成 Base64 PNG 和计算 find_contours，大幅降低 CPU 开销。
+3. 状态异步同步：取消勾选时仅传输几字节 ID 状态，彻底解决连续勾选被重置的竞争问题。
+4. 明确的导出提示：点击“导出本张”弹出明确的提示框与导出路径。
+5. 搜索过滤：支持在侧边栏搜索框快速过滤 Cell ID。
 """
 
 from __future__ import annotations
@@ -29,63 +28,35 @@ from .segment import find_adjacent_cells_at
 
 
 def _arr_to_base64_png(arr: np.ndarray) -> str:
-    """将 [0, 1] float 或 uint8 图像转为 Base64 PNG 字符串。"""
-    import matplotlib.pyplot as plt
-
+    """将 [0, 1] float 图像转为 Base64 PNG 字符串。"""
     img = np.asarray(arr, dtype=np.float32)
     img = np.clip(img, 0.0, 1.0)
-    buf = io.BytesIO()
-    plt.imsave(buf, img, format="png")
-    buf.seek(0)
-    return "data:image/png;base64," + base64.b64encode(buf.read()).decode("utf-8")
+    img_uint8 = (img * 255).astype(np.uint8)
 
+    try:
+        from PIL import Image
 
-def _extract_contours_and_metadata(item: ReviewItem) -> dict:
-    """提取当前 ReviewItem 的轮廓、形心、面积与标签元数据。"""
-    labels = item.labels.astype(np.int32)
-    kept_set = set(item.kept_ids())
-    border_set = set(item.border_ids)
-    scalebar_set = set(item.scalebar_ids)
+        buf = io.BytesIO()
+        if img_uint8.ndim == 2:
+            Image.fromarray(img_uint8, mode="L").save(buf, format="PNG")
+        else:
+            Image.fromarray(img_uint8).save(buf, format="PNG")
+        buf.seek(0)
+        return "data:image/png;base64," + base64.b64encode(buf.read()).decode("utf-8")
+    except ImportError:
+        import matplotlib
 
-    props_all = regionprops(labels)
-    cells_info = []
-    contours_dict = {}
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
 
-    for prop in props_all:
-        cid = int(prop.label)
-        cy, cx = prop.centroid
-        area = int(prop.area)
-        mask = labels == cid
-
-        # 提取轮廓坐标 [[x, y], ...]
-        raw_contours = find_contours(mask.astype(float), 0.5)
-        formatted_contours = []
-        for c in raw_contours:
-            # c 是 (row, col) = (y, x)，前端 Canvas 需要 [x, y]
-            formatted_contours.append([[round(float(pt[1]), 1), round(float(pt[0]), 1)] for pt in c[::2]])
-
-        contours_dict[str(cid)] = formatted_contours
-        cells_info.append(
-            {
-                "id": cid,
-                "centroid": [round(float(cx), 1), round(float(cy), 1)],
-                "area": area,
-                "is_kept": cid in kept_set,
-                "is_border": cid in border_set,
-                "is_scalebar": cid in scalebar_set,
-            }
-        )
-
-    return {
-        "cells": cells_info,
-        "contours": contours_dict,
-        "width": int(labels.shape[1]),
-        "height": int(labels.shape[0]),
-    }
+        buf = io.BytesIO()
+        plt.imsave(buf, img, format="png")
+        buf.seek(0)
+        return "data:image/png;base64," + base64.b64encode(buf.read()).decode("utf-8")
 
 
 class WebReviewServer:
-    """CellMask 本地 Web 服务器。"""
+    """CellMask 本地 Web 服务器（极速缓存版）。"""
 
     def __init__(
         self,
@@ -108,19 +79,20 @@ class WebReviewServer:
         self.server_thread: threading.Thread | None = None
         self._finished = False
 
+        # 内存缓存
+        self._bg_cache: dict[str, dict[str, str]] = {}
+        self._geom_cache: dict[str, dict] = {}
+
         if auto_flag_on_start:
             for it in self.items:
                 it.apply_auto_flags(border=True, scalebar=True)
 
-    def _get_item_payload(self, idx: int) -> dict:
-        if idx < 0 or idx >= len(self.items):
-            return {"error": "索引越界"}
-        item = self.items[idx]
-        item.reviewed = True
+    def _get_bg_images(self, item: ReviewItem) -> dict[str, str | None]:
+        key = item.image_id
+        if key in self._bg_cache:
+            return self._bg_cache[key]
 
-        # 生成通道背景图
-        display_img = item.image
-        bg_red = _arr_to_base64_png(display_img)
+        bg_red = _arr_to_base64_png(item.image)
         bg_green = None
         bg_merge = None
 
@@ -144,7 +116,63 @@ class WebReviewServer:
             except Exception:
                 pass
 
-        geom = _extract_contours_and_metadata(item)
+        res = {"bg_red": bg_red, "bg_green": bg_green, "bg_merge": bg_merge}
+        self._bg_cache[key] = res
+        return res
+
+    def _get_geom_metadata(self, item: ReviewItem, force_recompute: bool = False) -> dict:
+        key = f"{item.image_id}_{hash(item.labels.tobytes())}"
+        if not force_recompute and key in self._geom_cache:
+            return self._geom_cache[key]
+
+        labels = item.labels.astype(np.int32)
+        border_set = set(item.border_ids)
+        scalebar_set = set(item.scalebar_ids)
+
+        props_all = regionprops(labels)
+        cells_info = []
+        contours_dict = {}
+
+        for prop in props_all:
+            cid = int(prop.label)
+            cy, cx = prop.centroid
+            area = int(prop.area)
+            mask = labels == cid
+
+            raw_contours = find_contours(mask.astype(float), 0.5)
+            formatted_contours = []
+            for c in raw_contours:
+                formatted_contours.append([[round(float(pt[1]), 1), round(float(pt[0]), 1)] for pt in c[::2]])
+
+            contours_dict[str(cid)] = formatted_contours
+            cells_info.append(
+                {
+                    "id": cid,
+                    "centroid": [round(float(cx), 1), round(float(cy), 1)],
+                    "area": area,
+                    "is_border": cid in border_set,
+                    "is_scalebar": cid in scalebar_set,
+                }
+            )
+
+        res = {
+            "cells": cells_info,
+            "contours": contours_dict,
+            "width": int(labels.shape[1]),
+            "height": int(labels.shape[0]),
+        }
+        self._geom_cache[key] = res
+        return res
+
+    def _get_item_payload(self, idx: int) -> dict:
+        if idx < 0 or idx >= len(self.items):
+            return {"error": "索引越界"}
+        item = self.items[idx]
+        item.reviewed = True
+
+        bgs = self._get_bg_images(item)
+        geom = self._get_geom_metadata(item)
+
         return {
             "index": idx,
             "total": len(self.items),
@@ -154,19 +182,19 @@ class WebReviewServer:
             "diameter": item.diameter if item.diameter else "Auto",
             "notes": item.notes,
             "scale_box": item.scale_box,
-            "bg_red": bg_red,
-            "bg_green": bg_green,
-            "bg_merge": bg_merge,
+            "rejected_ids": sorted(list(item.rejected)),
+            "bg_red": bgs["bg_red"],
+            "bg_green": bgs["bg_green"],
+            "bg_merge": bgs["bg_merge"],
             "geom": geom,
         }
 
     def start_and_wait(self) -> list[ReviewItem]:
-        """启动 HTTP 服务并自动在浏览器中打开页面，阻塞直到用户导出或关闭。"""
         reviewer_self = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
-                pass  # 禁用标准日志输出
+                pass
 
             def _send_json(self, data: dict, status: int = 200):
                 body = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -227,23 +255,22 @@ class WebReviewServer:
                 item = reviewer_self.items[idx]
                 item.reviewed = True
 
-                if path == "/api/toggle_cell":
+                # 轻量级切换接口：仅更新并返回 rejected 集合，不重发大图片
+                if path in ("/api/toggle_cell", "/api/set_cell_status"):
                     cid = int(data.get("cell_id", 0))
-                    if cid in item.rejected:
-                        item.rejected.remove(cid)
+                    if path == "/api/toggle_cell":
+                        if cid in item.rejected:
+                            item.rejected.remove(cid)
+                        else:
+                            item.rejected.add(cid)
                     else:
-                        item.rejected.add(cid)
-                    self._send_json({"success": True, "item": reviewer_self._get_item_payload(idx)})
-                    return
+                        keep = bool(data.get("keep", True))
+                        if keep and cid in item.rejected:
+                            item.rejected.remove(cid)
+                        elif not keep:
+                            item.rejected.add(cid)
 
-                if path == "/api/set_cell_status":
-                    cid = int(data.get("cell_id", 0))
-                    keep = bool(data.get("keep", True))
-                    if keep and cid in item.rejected:
-                        item.rejected.remove(cid)
-                    elif not keep:
-                        item.rejected.add(cid)
-                    self._send_json({"success": True, "item": reviewer_self._get_item_payload(idx)})
+                    self._send_json({"success": True, "rejected_ids": sorted(list(item.rejected))})
                     return
 
                 if path == "/api/merge_border":
@@ -255,11 +282,14 @@ class WebReviewServer:
                         id1, id2 = cids[0], cids[1]
                         merged = item.merge_cells(id1, id2)
                     elif len(cids) == 1:
-                        # 尝试扩大半径搜索相邻细胞
                         cids_wider = find_adjacent_cells_at(item.labels, y, x, radius=12)
                         if len(cids_wider) >= 2:
                             id1, id2 = cids_wider[0], cids_wider[1]
                             merged = item.merge_cells(id1, id2)
+
+                    if merged:
+                        # 重新计算 geom 缓存
+                        reviewer_self._get_geom_metadata(item, force_recompute=True)
 
                     self._send_json(
                         {
@@ -281,40 +311,45 @@ class WebReviewServer:
                     elif action == "reset":
                         item.reset_flags()
 
-                    self._send_json({"success": True, "item": reviewer_self._get_item_payload(idx)})
+                    self._send_json({"success": True, "rejected_ids": sorted(list(item.rejected))})
                     return
 
                 if path == "/api/export_one":
-                    path_out = None
-                    if reviewer_self.on_export_one:
-                        path_out = reviewer_self.on_export_one(item)
-                    self._send_json(
-                        {
-                            "success": True,
-                            "exported_path": str(path_out) if path_out else None,
-                        }
-                    )
+                    exported_path = None
+                    try:
+                        if reviewer_self.on_export_one:
+                            exported_path = reviewer_self.on_export_one(item)
+                        self._send_json(
+                            {
+                                "success": True,
+                                "image_id": item.image_id,
+                                "exported_path": str(exported_path) if exported_path else "已导出",
+                            }
+                        )
+                    except Exception as err:
+                        self._send_json({"success": False, "error": str(err)}, status=500)
                     return
 
                 if path == "/api/export_all":
                     paths_out = []
-                    if reviewer_self.on_export_all:
-                        paths_out = reviewer_self.on_export_all(reviewer_self.items)
-                    reviewer_self._finished = True
-                    self._send_json(
-                        {
-                            "success": True,
-                            "count": len(paths_out),
-                            "exported": [str(p) for p in paths_out],
-                        }
-                    )
-                    # 延时关闭服务器
-                    threading.Thread(target=reviewer_self.stop).start()
+                    try:
+                        if reviewer_self.on_export_all:
+                            paths_out = reviewer_self.on_export_all(reviewer_self.items)
+                        reviewer_self._finished = True
+                        self._send_json(
+                            {
+                                "success": True,
+                                "count": len(paths_out),
+                                "exported": [str(p) for p in paths_out],
+                            }
+                        )
+                        threading.Thread(target=reviewer_self.stop).start()
+                    except Exception as err:
+                        self._send_json({"success": False, "error": str(err)}, status=500)
                     return
 
                 self.send_error(404, "Not Found")
 
-        # 寻找可用端口
         port = self.port
         for p in range(port, port + 20):
             try:
@@ -329,23 +364,19 @@ class WebReviewServer:
 
         url = f"http://127.0.0.1:{self.port}"
         print(f"\n==============================================")
-        print(f"  CellMask Web 交互界面已启动!")
+        print(f"  CellMask Web 极速交互界面已启动!")
         print(f"  访问地址: {url}")
-        print(f"  在浏览器中可进行放大、平移、剔除及删除边框合并")
         print(f"==============================================\n")
 
-        # 在新线程运行服务器
         self.server_thread = threading.Thread(target=self.server.serve_forever)
         self.server_thread.daemon = True
         self.server_thread.start()
 
-        # 自动打开浏览器
         try:
             webbrowser.open(url)
         except Exception:
             pass
 
-        # 阻塞等待完成
         try:
             while not self._finished:
                 self.server_thread.join(timeout=1.0)
@@ -370,7 +401,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CellMask 人工筛选与边框编辑</title>
+    <title>CellMask 极速审核与边框编辑</title>
     <style>
         :root {
             --bg-dark: #121418;
@@ -387,7 +418,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         body { background: var(--bg-dark); color: var(--text-main); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 
-        /* Top Header */
         header {
             background: var(--panel-bg);
             border-bottom: 1px solid var(--panel-border);
@@ -411,19 +441,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .btn-primary:hover { background: var(--accent-hover); }
         .btn-success { background: #16a34a; border-color: #16a34a; }
         .btn-success:hover { background: #22c55e; }
-        .btn-active { background: #3b82f6; border-color: #60a5fa; color: #fff; }
 
-        /* Main Workspace */
         main { flex: 1; display: flex; overflow: hidden; position: relative; }
 
-        /* Left Canvas Container */
         .canvas-container {
             flex: 1; position: relative; background: #0a0c0e; overflow: hidden; cursor: grab; user-select: none;
         }
         .canvas-container:active { cursor: grabbing; }
         canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 
-        /* Floating Toolbar */
         .floating-tools {
             position: absolute; top: 16px; left: 16px; background: rgba(28, 32, 38, 0.85); backdrop-filter: blur(8px);
             border: 1px solid var(--panel-border); border-radius: 8px; padding: 6px; display: flex; flex-direction: column; gap: 6px; z-index: 10;
@@ -435,37 +461,33 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .tool-btn:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
         .tool-btn.active { background: var(--accent); color: #fff; }
 
-        /* Right Sidebar */
         aside {
             width: 320px; background: var(--panel-bg); border-left: 1px solid var(--panel-border);
             display: flex; flex-direction: column; height: 100%; z-index: 5;
         }
-        .sidebar-section { padding: 14px; border-bottom: 1px solid var(--panel-border); }
-        .section-title { font-size: 12px; font-weight: 600; text-transform: uppercase; color: var(--text-sub); margin-bottom: 10px; letter-spacing: 0.5px; }
+        .sidebar-section { padding: 12px 14px; border-bottom: 1px solid var(--panel-border); }
+        .section-title { font-size: 12px; font-weight: 600; text-transform: uppercase; color: var(--text-sub); margin-bottom: 8px; letter-spacing: 0.5px; }
 
-        .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 8px; }
-        .stat-card { background: #121519; padding: 8px; border-radius: 6px; text-align: center; border: 1px solid rgba(255,255,255,0.05); }
-        .stat-num { font-size: 16px; font-weight: bold; margin-top: 2px; }
+        .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 4px; }
+        .stat-card { background: #121519; padding: 6px; border-radius: 6px; text-align: center; border: 1px solid rgba(255,255,255,0.05); }
+        .stat-num { font-size: 15px; font-weight: bold; margin-top: 2px; }
         .stat-num.keep { color: var(--keep-color); }
         .stat-num.rej { color: var(--reject-color); }
 
         .btn-group-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 
-        /* Cell List */
-        .cell-list-wrapper { flex: 1; overflow-y: auto; padding: 10px; }
+        .cell-list-wrapper { flex: 1; overflow-y: auto; padding: 8px 10px; }
         .cell-item {
-            display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 6px;
-            background: #15181d; border: 1px solid transparent; margin-bottom: 6px; cursor: pointer; transition: all 0.12s;
+            display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border-radius: 6px;
+            background: #15181d; border: 1px solid transparent; margin-bottom: 4px; cursor: pointer; transition: all 0.1s;
         }
         .cell-item:hover { border-color: rgba(255,255,255,0.15); background: #1e232a; }
-        .cell-item.selected { border-color: var(--accent); }
-        .cell-info { display: flex; align-items: center; gap: 10px; }
-        .cell-tag { font-size: 10px; padding: 1px 5px; border-radius: 3px; background: #374151; color: #d1d5db; }
+        .cell-info { display: flex; align-items: center; gap: 8px; }
+        .cell-tag { font-size: 10px; padding: 1px 4px; border-radius: 3px; background: #374151; color: #d1d5db; }
         .cell-tag.border { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
         .cell-tag.scalebar { background: rgba(6, 182, 212, 0.2); color: #67e8f9; }
 
-        /* Switch Toggle */
-        .toggle-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 13px; color: #d1d5db; }
+        .toggle-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; font-size: 13px; color: #d1d5db; }
         .switch { position: relative; display: inline-block; width: 34px; height: 18px; }
         .switch input { opacity: 0; width: 0; height: 0; }
         .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #374151; transition: .2s; border-radius: 18px; }
@@ -473,10 +495,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         input:checked + .slider { background-color: var(--accent); }
         input:checked + .slider:before { transform: translateX(16px); }
 
-        /* Status Toast */
         #toast {
-            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.85); color: #fff;
-            padding: 8px 16px; border-radius: 20px; font-size: 13px; border: 1px solid #374151; display: none; z-index: 100;
+            position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); background: rgba(15, 23, 42, 0.95); color: #fff;
+            padding: 10px 20px; border-radius: 20px; font-size: 13px; border: 1px solid #3b82f6; display: none; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        }
+
+        .search-box {
+            width: 100%; background: #121519; border: 1px solid var(--panel-border); color: #fff;
+            padding: 4px 8px; border-radius: 4px; font-size: 12px; margin-bottom: 8px;
         }
     </style>
 </head>
@@ -484,7 +510,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <header>
         <div class="header-title">
-            <span>🔬 CellMask 交互审核与边框编辑</span>
+            <span>🔬 CellMask 交互审核</span>
             <span class="badge" id="image-id-tag">载入中...</span>
         </div>
         <div class="top-controls">
@@ -492,13 +518,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <span id="page-indicator" style="font-size:13px; color:#9ca3af;">1 / 1</span>
             <button class="btn" onclick="navField(1)">下一张 (n) ▶</button>
             <div style="width: 1px; height: 20px; background: var(--panel-border);"></div>
-            <button class="btn" onclick="exportOne()">导出本张</button>
+            <button class="btn btn-primary" onclick="exportOne()">导出本张</button>
             <button class="btn btn-success" onclick="exportAll()">完成并导出全部</button>
         </div>
     </header>
 
     <main>
-        <!-- Floating Tool Menu -->
         <div class="floating-tools">
             <button class="tool-btn active" id="tool-toggle" onclick="setTool('toggle')" title="切换保留/剔除模式 (点击细胞)">👆</button>
             <button class="tool-btn" id="tool-merge" onclick="setTool('merge')" title="删除分割边框 / 合并细胞模式 (点击分割线)">✂️</button>
@@ -510,7 +535,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <aside>
-            <!-- Field Info & Stats -->
             <div class="sidebar-section">
                 <div class="section-title">视野统计</div>
                 <div class="stat-grid">
@@ -529,7 +553,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </div>
             </div>
 
-            <!-- Quick Actions -->
             <div class="sidebar-section">
                 <div class="section-title">快捷筛选操作</div>
                 <div class="btn-group-grid">
@@ -540,19 +563,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </div>
             </div>
 
-            <!-- Visual Settings -->
             <div class="sidebar-section">
                 <div class="section-title">显示设置</div>
                 <div class="toggle-row">
-                    <span>通道背景</span>
+                    <span>背景衬底</span>
                     <select id="channel-select" onchange="changeChannel()" style="background:#2a313d; color:#fff; border:1px solid #374151; border-radius:4px; padding:2px 6px;">
-                        <option value="red">红 (DiI)</option>
-                        <option value="green">绿 (EGFP)</option>
-                        <option value="merge">Merge</option>
+                        <option value="red">🔴 红 (Cellpose 分割源图)</option>
+                        <option value="green">🟢 绿 (对比衬底)</option>
+                        <option value="merge">🟣 Merge (对比衬底)</option>
                     </select>
                 </div>
                 <div class="toggle-row">
-                    <span>显示细胞编号 (i)</span>
+                    <span>显示编号 (i)</span>
                     <label class="switch">
                         <input type="checkbox" id="show-ids" checked onchange="renderCanvas()">
                         <span class="slider"></span>
@@ -566,24 +588,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </label>
                 </div>
                 <div class="toggle-row">
-                    <span>Mask 不透明度</span>
+                    <span>Mask 透明度</span>
                     <input type="range" id="opacity-slider" min="0.1" max="0.8" step="0.05" value="0.3" oninput="renderCanvas()" style="width:90px;">
                 </div>
             </div>
 
-            <!-- Cell Checklist -->
-            <div class="section-title" style="padding: 10px 14px 0 14px;">细胞清单 (勾选保留)</div>
-            <div class="cell-list-wrapper" id="cell-list">
-                <!-- Cell items rendered dynamically -->
+            <div style="padding: 10px 14px 0 14px; display:flex; flex-direction:column; flex:1; overflow:hidden;">
+                <div class="section-title">细胞清单 (勾选保留)</div>
+                <input type="text" class="search-box" id="cell-search" placeholder="🔍 搜索 Cell ID..." oninput="filterCellList()">
+                <div class="cell-list-wrapper" id="cell-list"></div>
             </div>
         </aside>
     </main>
 
-    <div id="toast">保存成功</div>
+    <div id="toast">已成功导出</div>
 
     <script>
         let currentItem = null;
-        let currentTool = 'toggle'; // 'toggle' | 'merge'
+        let rejectedSet = new Set(); // 本地权威 剔除 Set，0 延迟更新
+        let currentTool = 'toggle';
         let currentChannel = 'red';
         let zoom = 1.0;
         let panX = 0, panY = 0;
@@ -593,10 +616,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const container = document.getElementById('canvas-container');
         const canvas = document.getElementById('main-canvas');
         const ctx = canvas.getContext('2d');
-
         const bgImages = { red: new Image(), green: new Image(), merge: new Image() };
 
-        // 载入当前视野
         async function loadField(index = 0) {
             try {
                 const res = await fetch(`/api/item?index=${index}`);
@@ -604,18 +625,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 if (data.error) return alert(data.error);
 
                 currentItem = data;
-                document.getElementById('image-id-tag').innerText = data.image_id;
-                document.getElementById('page-indicator').innerText = `${data.index + 1} / ${data.total}`;
+                rejectedSet = new Set(data.rejected_ids || []);
 
-                if (data.bg_red) bgImages.red.src = data.bg_red;
-                if (data.bg_green) bgImages.green.src = data.bg_green;
-                if (data.bg_merge) bgImages.merge.src = data.bg_merge;
+                if (data.bg_red) {
+                    bgImages.red.onload = () => renderCanvas();
+                    bgImages.red.src = data.bg_red;
+                }
+                if (data.bg_green) {
+                    bgImages.green.onload = () => renderCanvas();
+                    bgImages.green.src = data.bg_green;
+                } else {
+                    bgImages.green.src = '';
+                }
+                if (data.bg_merge) {
+                    bgImages.merge.onload = () => renderCanvas();
+                    bgImages.merge.src = data.bg_merge;
+                } else {
+                    bgImages.merge.src = '';
+                }
 
-                bgImages.red.onload = () => {
-                    if (index === 0 && zoom === 1.0) resetZoom();
-                    renderCanvas();
-                };
-
+                resetZoom();
                 updateSidebarStats();
                 renderCellList();
                 renderCanvas();
@@ -628,7 +657,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             currentTool = tool;
             document.getElementById('tool-toggle').classList.toggle('active', tool === 'toggle');
             document.getElementById('tool-merge').classList.toggle('active', tool === 'merge');
-            showToast(tool === 'merge' ? '删除边框模式：点击或划过两个细胞的交界边框进行合并' : '切换模式：点击细胞保留/剔除');
+            showToast(tool === 'merge' ? '删除边框模式：点击或划过两个细胞交界边框合并' : '切换模式：点击细胞保留/剔除');
         }
 
         function changeChannel() {
@@ -652,14 +681,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         function updateSidebarStats() {
             if (!currentItem) return;
-            const cells = currentItem.geom.cells;
-            const total = cells.length;
-            const keep = cells.filter(c => c.is_kept).length;
-            const rej = total - keep;
+            const total = currentItem.geom.cells.length;
+            const rejCount = rejectedSet.size;
+            const keepCount = total - rejCount;
 
             document.getElementById('stat-total').innerText = total;
-            document.getElementById('stat-keep').innerText = keep;
-            document.getElementById('stat-rej').innerText = rej;
+            document.getElementById('stat-keep').innerText = keepCount;
+            document.getElementById('stat-rej').innerText = rejCount;
         }
 
         function renderCellList() {
@@ -667,11 +695,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             listEl.innerHTML = '';
             if (!currentItem) return;
 
+            const filterVal = document.getElementById('cell-search').value.trim();
+
             currentItem.geom.cells.forEach(c => {
+                if (filterVal && !c.id.toString().includes(filterVal)) return;
+
+                const isKept = !rejectedSet.has(c.id);
                 const itemEl = document.createElement('div');
                 itemEl.className = 'cell-item';
+                itemEl.id = `cell-row-${c.id}`;
                 itemEl.onclick = (e) => {
-                    if (e.target.tagName !== 'INPUT') toggleCell(c.id);
+                    if (e.target.tagName !== 'INPUT') toggleCellLocal(c.id);
                 };
 
                 let tagsHtml = '';
@@ -680,13 +714,60 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                 itemEl.innerHTML = `
                     <div class="cell-info">
-                        <input type="checkbox" ${c.is_kept ? 'checked' : ''} onclick="event.stopPropagation(); setCellStatus(${c.id}, this.checked)">
-                        <span style="font-weight:600; font-size:13px; color:${c.is_kept ? '#34d399' : '#f87171'}">#${c.id}</span>
+                        <input type="checkbox" id="chk-${c.id}" ${isKept ? 'checked' : ''} onclick="event.stopPropagation(); setCellStatusLocal(${c.id}, this.checked)">
+                        <span id="label-${c.id}" style="font-weight:600; font-size:13px; color:${isKept ? '#34d399' : '#f87171'}">#${c.id}</span>
                         ${tagsHtml}
                     </div>
                     <span style="font-size:11px; color:#9ca3af;">${c.area} px</span>
                 `;
                 listEl.appendChild(itemEl);
+            });
+        }
+
+        function filterCellList() {
+            renderCellList();
+        }
+
+        function updateCellRowUI(cellId) {
+            const isKept = !rejectedSet.has(cellId);
+            const chk = document.getElementById(`chk-${cellId}`);
+            if (chk) chk.checked = isKept;
+            const lbl = document.getElementById(`label-${cellId}`);
+            if (lbl) lbl.style.color = isKept ? '#34d399' : '#f87171';
+        }
+
+        // 0ms 纯前端即时更新
+        function toggleCellLocal(cellId) {
+            if (rejectedSet.has(cellId)) {
+                rejectedSet.delete(cellId);
+            } else {
+                rejectedSet.add(cellId);
+            }
+            updateCellRowUI(cellId);
+            updateSidebarStats();
+            renderCanvas();
+            // 后台异步同步给后端
+            fetch('/api/toggle_cell', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ index: currentItem.index, cell_id: cellId })
+            });
+        }
+
+        function setCellStatusLocal(cellId, keep) {
+            if (keep) {
+                rejectedSet.delete(cellId);
+            } else {
+                rejectedSet.add(cellId);
+            }
+            updateCellRowUI(cellId);
+            updateSidebarStats();
+            renderCanvas();
+            // 后台异步同步
+            fetch('/api/set_cell_status', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ index: currentItem.index, cell_id: cellId, keep: keep })
             });
         }
 
@@ -703,13 +784,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             ctx.translate(panX, panY);
             ctx.scale(zoom, zoom);
 
-            // 1. 绘制背景图
             const img = bgImages[currentChannel] && bgImages[currentChannel].complete ? bgImages[currentChannel] : bgImages.red;
             if (img.complete) {
                 ctx.drawImage(img, 0, 0, w, h);
             }
 
-            // 2. 绘制标尺框
             if (currentItem.scale_box) {
                 const [y0, y1, x0, x1] = currentItem.scale_box;
                 ctx.strokeStyle = 'cyan';
@@ -723,12 +802,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const showRejected = document.getElementById('show-rejected').checked;
             const opacity = parseFloat(document.getElementById('opacity-slider').value);
 
-            // 3. 绘制细胞 Mask 填充与轮廓
             currentItem.geom.cells.forEach(c => {
-                if (!c.is_kept && !showRejected) return;
+                const isKept = !rejectedSet.has(c.id);
+                if (!isKept && !showRejected) return;
 
                 const contours = currentItem.geom.contours[c.id.toString()] || [];
-                const color = c.is_kept ? '#22c55e' : '#ef4444';
+                const color = isKept ? '#22c55e' : '#ef4444';
 
                 contours.forEach(poly => {
                     if (poly.length === 0) return;
@@ -739,21 +818,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     }
                     ctx.closePath();
 
-                    // Fill
-                    ctx.fillStyle = c.is_kept ? `rgba(34, 197, 94, ${opacity})` : `rgba(239, 68, 68, ${opacity * 0.7})`;
+                    ctx.fillStyle = isKept ? `rgba(34, 197, 94, ${opacity})` : `rgba(239, 68, 68, ${opacity * 0.7})`;
                     ctx.fill();
 
-                    // Contour Border
                     ctx.strokeStyle = color;
-                    ctx.lineWidth = (c.is_kept ? 1.8 : 1.2) / zoom;
+                    ctx.lineWidth = (isKept ? 1.8 : 1.2) / zoom;
                     ctx.stroke();
                 });
 
-                // Draw ID
                 if (showIds) {
                     const [cx, cy] = c.centroid;
                     ctx.font = `bold ${Math.max(10, 12 / zoom)}px sans-serif`;
-                    ctx.fillStyle = c.is_kept ? '#a7f3d0' : '#fca5a5';
+                    ctx.fillStyle = isKept ? '#a7f3d0' : '#fca5a5';
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'middle';
                     ctx.fillText(c.id.toString(), cx, cy);
@@ -763,7 +839,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             ctx.restore();
         }
 
-        // Canvas 交互
         container.addEventListener('wheel', (e) => {
             e.preventDefault();
             const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
@@ -779,7 +854,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         container.addEventListener('mousedown', (e) => {
             if (e.button === 1 || e.button === 2 || e.shiftKey) {
-                // 中键/右键/Shift 平移
                 isDragging = true;
                 dragStartX = e.clientX - panX;
                 dragStartY = e.clientY - panY;
@@ -790,7 +864,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                 if (currentTool === 'toggle') {
                     const clickedCell = findCellAt(canvasX, canvasY);
-                    if (clickedCell) toggleCell(clickedCell.id);
+                    if (clickedCell) toggleCellLocal(clickedCell.id);
                 } else if (currentTool === 'merge') {
                     mergeBorderAt(canvasX, canvasY);
                 }
@@ -830,38 +904,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             return inside;
         }
 
-        // 后端 API 调用
-        async function toggleCell(cellId) {
-            const res = await fetch('/api/toggle_cell', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ index: currentItem.index, cell_id: cellId })
-            });
-            const data = await res.json();
-            if (data.success) {
-                currentItem = data.item;
-                updateSidebarStats();
-                renderCellList();
-                renderCanvas();
-            }
-        }
-
-        async function setCellStatus(cellId, keep) {
-            const res = await fetch('/api/set_cell_status', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ index: currentItem.index, cell_id: cellId, keep: keep })
-            });
-            const data = await res.json();
-            if (data.success) {
-                currentItem = data.item;
-                updateSidebarStats();
-                renderCellList();
-                renderCanvas();
-            }
-        }
-
         async function mergeBorderAt(x, y) {
+            showToast('正在消除边框合并细胞...');
             const res = await fetch('/api/merge_border', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -870,12 +914,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const data = await res.json();
             if (data.success) {
                 currentItem = data.item;
-                showToast('已合并相邻细胞，消除边框!');
+                rejectedSet = new Set(data.item.rejected_ids || []);
+                showToast('✅ 已消除交界边框，成功合并细胞!');
                 updateSidebarStats();
                 renderCellList();
                 renderCanvas();
             } else {
-                showToast('未检测到要消除的共享边框');
+                showToast('⚠️ 未检测到要消除的共享边框');
             }
         }
 
@@ -887,7 +932,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             });
             const data = await res.json();
             if (data.success) {
-                currentItem = data.item;
+                rejectedSet = new Set(data.rejected_ids || []);
                 updateSidebarStats();
                 renderCellList();
                 renderCanvas();
@@ -897,32 +942,54 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         function navField(dir) {
             if (!currentItem) return;
             const target = currentItem.index + dir;
-            if (target >= 0 && target < currentItem.total) {
+            if (target < 0) {
+                showToast('已经是第一张视野');
+            } else if (target >= currentItem.total) {
+                showToast('已经是最后一张视野！点击“完成并导出全部”即可完成');
+            } else {
                 loadField(target);
             }
         }
 
         async function exportOne() {
-            const res = await fetch('/api/export_one', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ index: currentItem.index })
-            });
-            const data = await res.json();
-            if (data.success) showToast('已成功导出当前视野到 output 目录');
+            try {
+                showToast('正在导出当前视野...');
+                const res = await fetch('/api/export_one', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ index: currentItem.index })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    const msg = `🎉 成功导出当前视野 [${data.image_id}]!\n\n导出路径: ${data.exported_path}`;
+                    alert(msg);
+                    showToast('✅ 导出成功!');
+                } else {
+                    alert(`导出失败: ${data.error || '未知错误'}`);
+                }
+            } catch (err) {
+                alert(`导出请求失败: ${err}`);
+            }
         }
 
         async function exportAll() {
-            if (!confirm("确认导出所有已确认视野并退出 Web 审核？")) return;
-            const res = await fetch('/api/export_all', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({})
-            });
-            const data = await res.json();
-            if (data.success) {
-                alert(`已成功导出 ${data.count} 个文件！您可以关闭本页面。`);
-                window.close();
+            if (!confirm("确认导出所有已确认视野并结束？")) return;
+            try {
+                showToast('正在导出全部视野...');
+                const res = await fetch('/api/export_all', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    alert(`🎉 已成功导出全部 ${data.count} 个视野文件！您现在可以关闭本页面。`);
+                    window.close();
+                } else {
+                    alert(`导出失败: ${data.error || '未知错误'}`);
+                }
+            } catch (err) {
+                alert(`导出请求失败: ${err}`);
             }
         }
 
@@ -930,10 +997,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const t = document.getElementById('toast');
             t.innerText = msg;
             t.style.display = 'block';
-            setTimeout(() => { t.style.display = 'none'; }, 2000);
+            setTimeout(() => { t.style.display = 'none'; }, 2500);
         }
 
-        // 键盘快捷键
         window.addEventListener('keydown', (e) => {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
             const k = e.key.toLowerCase();
@@ -955,7 +1021,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         });
 
-        // 启动
         loadField(0);
     </script>
 </body>

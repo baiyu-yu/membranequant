@@ -69,14 +69,20 @@ def export_item(
 
     if save_overlay:
         try:
-            import matplotlib
-
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-
             overlay = build_rgb_overlay(item.image, item.labels, item.rejected)
             overlay_path = overlay_dir / f"{stem}_overlay.png"
-            plt.imsave(str(overlay_path), overlay)
+            overlay_uint8 = (np.clip(overlay, 0, 1) * 255).astype(np.uint8)
+            try:
+                from PIL import Image
+
+                Image.fromarray(overlay_uint8).save(str(overlay_path))
+            except ImportError:
+                import matplotlib
+
+                matplotlib.use("Agg")
+                import matplotlib.pyplot as plt
+
+                plt.imsave(str(overlay_path), overlay)
             paths["overlay"] = overlay_path
         except Exception as e:
             print(f"[warn] overlay 保存失败 {stem}: {e}")
