@@ -30,32 +30,57 @@ from .review_gui import ReviewItem
 from .segment import find_adjacent_cells_at
 
 
-def _arr_to_base64_png(arr: np.ndarray) -> str:
-    """将 [0, 1] float 图像转为 Base64 PNG 字符串。"""
-    img = np.asarray(arr, dtype=np.float32)
-    img = np.clip(img, 0.0, 1.0)
-    img_uint8 = (img * 255).astype(np.uint8)
+def _normalize_img(arr: np.ndarray) -> np.ndarray:
+    a = np.asarray(arr, dtype=np.float32)
+    lo, hi = float(np.min(a)), float(np.max(a))
+    if hi <= lo:
+        return np.zeros_like(a, dtype=np.float32)
+    return (a - lo) / (hi - lo)
 
+
+def _to_base64_png_rgb(rgb_u8: np.ndarray) -> str:
+    """将 uint8 RGB (H, W, 3) 图像转为 Base64 PNG 字符串。"""
+    buf = io.BytesIO()
     try:
         from PIL import Image
 
-        buf = io.BytesIO()
-        if img_uint8.ndim == 2:
-            Image.fromarray(img_uint8, mode="L").save(buf, format="PNG")
+        if rgb_u8.ndim == 2:
+            Image.fromarray(rgb_u8, mode="L").save(buf, format="PNG")
         else:
-            Image.fromarray(img_uint8).save(buf, format="PNG")
-        buf.seek(0)
-        return "data:image/png;base64," + base64.b64encode(buf.read()).decode("utf-8")
+            Image.fromarray(rgb_u8, mode="RGB").save(buf, format="PNG")
     except ImportError:
         import matplotlib
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        buf = io.BytesIO()
-        plt.imsave(buf, img, format="png")
-        buf.seek(0)
-        return "data:image/png;base64," + base64.b64encode(buf.read()).decode("utf-8")
+        plt.imsave(buf, rgb_u8, format="png")
+
+    buf.seek(0)
+    return "data:image/png;base64," + base64.b64encode(buf.read()).decode("utf-8")
+
+
+def _make_fluorescent_pseudo_color(arr_2d: np.ndarray, channel: str = "red") -> np.ndarray:
+    """将单通道 2D 归一化浮点图转为 RGB 荧光伪彩 uint8 数组。
+
+    channel:
+      - 'red': 经典红色荧光伪彩 (DiI 膜标记)
+      - 'green': 经典绿色荧光伪彩 (EGFP 绿荧光)
+    """
+    norm = np.clip(np.asarray(arr_2d, dtype=np.float32), 0.0, 1.0)
+    u8 = (norm * 255.0).astype(np.uint8)
+    h, w = u8.shape[:2]
+
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    if channel == "red":
+        rgb[..., 0] = u8
+    elif channel == "green":
+        rgb[..., 1] = u8
+    else:
+        rgb[..., 0] = u8
+        rgb[..., 1] = u8
+        rgb[..., 2] = u8
+    return rgb
 
 
 class WebReviewServer:
@@ -94,29 +119,60 @@ class WebReviewServer:
         if key in self._bg_cache:
             return self._bg_cache[key]
 
-        bg_red = _arr_to_base64_png(item.image)
-        bg_green = None
-        bg_merge = None
+        import tifffile
+        from .io_scan import _as_2d
 
+        # 1. 红色荧光原图 (DiI 膜标记，RGB 红色荧光伪彩)
+        red_arr = None
+        if item.red_path and item.red_path.is_file():
+            try:
+                raw_r = tifffile.imread(str(item.red_path))
+                red_arr = _normalize_img(_as_2d(raw_r))
+            except Exception:
+                pass
+        if red_arr is None:
+            red_arr = _normalize_img(item.image)
+
+        rgb_red = _make_fluorescent_pseudo_color(red_arr, "red")
+        bg_red = _to_base64_png_rgb(rgb_red)
+
+        # 2. 绿色荧光原图 (EGFP 绿荧光，RGB 绿色荧光伪彩)
+        green_arr = None
+        bg_green = None
         if item.green_path and item.green_path.is_file():
             try:
-                import tifffile
-
-                g_arr = tifffile.imread(str(item.green_path)).astype(np.float32)
-                g_arr = (g_arr - g_arr.min()) / (g_arr.max() - g_arr.min() + 1e-6)
-                bg_green = _arr_to_base64_png(g_arr)
+                raw_g = tifffile.imread(str(item.green_path))
+                green_arr = _normalize_img(_as_2d(raw_g))
+                rgb_green = _make_fluorescent_pseudo_color(green_arr, "green")
+                bg_green = _to_base64_png_rgb(rgb_green)
             except Exception:
                 pass
 
+        # 3. Merge 荧光合成彩图
+        bg_merge = None
         if item.merge_path and item.merge_path.is_file():
             try:
-                import tifffile
-
-                m_arr = tifffile.imread(str(item.merge_path)).astype(np.float32)
-                m_arr = (m_arr - m_arr.min()) / (m_arr.max() - m_arr.min() + 1e-6)
-                bg_merge = _arr_to_base64_png(m_arr)
+                m_raw = tifffile.imread(str(item.merge_path))
+                m_arr = np.asarray(m_raw)
+                if m_arr.ndim == 3:
+                    if m_arr.shape[0] in (2, 3, 4) and m_arr.shape[0] < min(m_arr.shape[1], m_arr.shape[2]):
+                        m_arr = np.moveaxis(m_arr, 0, -1)
+                    rgb_m = np.zeros((*m_arr.shape[:2], 3), dtype=np.uint8)
+                    for c in range(min(3, m_arr.shape[-1])):
+                        rgb_m[..., c] = (_normalize_img(m_arr[..., c]) * 255).astype(np.uint8)
+                    bg_merge = _to_base64_png_rgb(rgb_m)
+                else:
+                    norm_m = _normalize_img(m_arr)
+                    bg_merge = _to_base64_png_rgb(_make_fluorescent_pseudo_color(norm_m, "red"))
             except Exception:
                 pass
+
+        if bg_merge is None and green_arr is not None:
+            # 自动基于红绿通道合成 RGB 荧光彩图
+            r_u8 = (red_arr * 255).astype(np.uint8)
+            g_u8 = (green_arr * 255).astype(np.uint8)
+            synth_merge = np.stack([r_u8, g_u8, np.zeros_like(r_u8)], axis=-1)
+            bg_merge = _to_base64_png_rgb(synth_merge)
 
         res = {"bg_red": bg_red, "bg_green": bg_green, "bg_merge": bg_merge}
         self._bg_cache[key] = res
