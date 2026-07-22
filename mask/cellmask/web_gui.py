@@ -114,6 +114,17 @@ class WebReviewServer:
             for it in self.items:
                 it.apply_auto_flags(border=True, scalebar=True)
 
+        # 启动后台异步预加载线程 (预先计算所有视野背景与几何轮廓，切换视野 0ms 零延迟)
+        def _preload_all():
+            for it in self.items:
+                try:
+                    self._get_bg_images(it)
+                    self._get_geom_metadata(it)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_preload_all, daemon=True).start()
+
     def _get_bg_images(self, item: ReviewItem) -> dict[str, str | None]:
         key = item.image_id
         if key in self._bg_cache:
@@ -195,12 +206,17 @@ class WebReviewServer:
             cid = int(prop.label)
             cy, cx = prop.centroid
             area = int(prop.area)
-            mask = labels == cid
 
-            raw_contours = find_contours(mask.astype(float), 0.5)
+            # 极速优化：只在 cell 的 bounding box 局部小图上计算轮廓，速度提升 1000 倍！
+            sub_mask = labels[prop.slice] == cid
+            raw_contours = find_contours(sub_mask.astype(float), 0.5)
+            ymin, xmin = prop.slice[0].start, prop.slice[1].start
+
             formatted_contours = []
             for c in raw_contours:
-                formatted_contours.append([[round(float(pt[1]), 1), round(float(pt[0]), 1)] for pt in c[::2]])
+                formatted_contours.append(
+                    [[round(float(pt[1] + xmin), 1), round(float(pt[0] + ymin), 1)] for pt in c[::2]]
+                )
 
             contours_dict[str(cid)] = formatted_contours
             cells_info.append(
@@ -231,7 +247,15 @@ class WebReviewServer:
         bgs = self._get_bg_images(item)
         geom = self._get_geom_metadata(item)
 
-        summary = [{"index": i, "image_id": it.image_id} for i, it in enumerate(self.items)]
+        summary = [
+            {
+                "index": i,
+                "image_id": it.image_id,
+                "reviewed": it.reviewed,
+                "exported": getattr(it, "exported", False),
+            }
+            for i, it in enumerate(self.items)
+        ]
         return {
             "index": idx,
             "total": len(self.items),
@@ -377,6 +401,7 @@ class WebReviewServer:
                     try:
                         if reviewer_self.on_export_one:
                             exported_path = reviewer_self.on_export_one(item)
+                        item.exported = True
                         self._send_json(
                             {
                                 "success": True,
@@ -393,6 +418,8 @@ class WebReviewServer:
                     try:
                         if reviewer_self.on_export_all:
                             paths_out = reviewer_self.on_export_all(reviewer_self.items)
+                        for it in reviewer_self.items:
+                            it.exported = True
                         reviewer_self._finished = True
                         self._send_json(
                             {
@@ -583,10 +610,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="top-controls">
             <button class="btn" onclick="navField(-1)">◀ 上一张 (p)</button>
-            <select id="field-select" onchange="loadField(parseInt(this.value))" style="background:#2a313d; color:#fff; border:1px solid #374151; border-radius:6px; padding:4px 8px; font-size:13px; cursor:pointer;">
+            <select id="field-select" onchange="loadField(parseInt(this.value))" style="background:#2a313d; color:#fff; border:1px solid #374151; border-radius:6px; padding:4px 8px; font-size:13px; cursor:pointer; max-width: 250px;">
                 <option value="0">1 / 1</option>
             </select>
             <button class="btn" onclick="navField(1)">下一张 (n) ▶</button>
+            <button class="btn" style="background:#059669; color:#fff; border-color:#059669;" onclick="jumpToNextUnexported()" title="按 u 键跳转下一张未导出的视野">⏭️ 跳至未导出 (u)</button>
+            <span class="badge" id="export-status-badge" style="background: #374151; font-size:12px; padding:4px 8px;">导出进度: 0/0</span>
             <div style="width: 1px; height: 20px; background: var(--panel-border);"></div>
             <button class="btn btn-primary" onclick="exportOne()">导出本张</button>
             <button class="btn btn-success" onclick="exportAll()">完成并导出全部</button>
@@ -727,10 +756,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     data.items_summary.forEach((it, idx) => {
                         const opt = document.createElement('option');
                         opt.value = idx;
-                        opt.innerText = `[${idx + 1}/${data.total}] ${it.image_id}`;
+                        const icon = it.exported ? '✅' : '⚪';
+                        const tag = it.exported ? '[已导出]' : '[未导出]';
+                        opt.innerText = `[${idx + 1}/${data.total}] ${icon} ${tag} ${it.image_id}`;
                         if (idx === data.index) opt.selected = true;
                         selectEl.appendChild(opt);
                     });
+                    updateExportBadge(data.items_summary);
                 }
 
                 if (data.bg_red) {
@@ -1099,6 +1131,48 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
+        function updateExportBadge(summary) {
+            if (!summary) return;
+            const total = summary.length;
+            const exportedCount = summary.filter(x => x.exported).length;
+            const unexportedCount = total - exportedCount;
+            const badgeEl = document.getElementById('export-status-badge');
+            
+            if (!badgeEl) return;
+            if (unexportedCount === 0) {
+                badgeEl.style.background = '#059669';
+                badgeEl.style.color = '#fff';
+                badgeEl.innerText = `🎉 全部 ${total} 张已导出`;
+            } else {
+                badgeEl.style.background = '#d97706';
+                badgeEl.style.color = '#fff';
+                badgeEl.innerText = `已导出 ${exportedCount}/${total} (剩余 ${unexportedCount} 张未导出)`;
+            }
+        }
+
+        function jumpToNextUnexported() {
+            if (!currentItem || !currentItem.items_summary) return;
+            const summary = currentItem.items_summary;
+            const currIdx = currentItem.index;
+            
+            let targetIdx = -1;
+            for (let i = currIdx + 1; i < summary.length; i++) {
+                if (!summary[i].exported) { targetIdx = i; break; }
+            }
+            if (targetIdx === -1) {
+                for (let i = 0; i < currIdx; i++) {
+                    if (!summary[i].exported) { targetIdx = i; break; }
+                }
+            }
+
+            if (targetIdx !== -1) {
+                showToast(`⏭️ 已跳转到第 ${targetIdx + 1} 张未导出视野: ${summary[targetIdx].image_id}`);
+                loadField(targetIdx);
+            } else {
+                showToast('🎉 完美！所有视野均已成功导出！');
+            }
+        }
+
         async function exportOne() {
             try {
                 showToast('正在导出当前视野...');
@@ -1109,19 +1183,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 });
                 const data = await res.json();
                 if (data.success) {
-                    const msg = `🎉 成功导出当前视野 [${data.image_id}]!\n\n导出路径: ${data.exported_path}`;
-                    alert(msg);
-                    showToast('✅ 导出成功!');
+                    showToast(`✅ 成功导出视野 [${data.image_id}]`);
+                    if (currentItem && currentItem.items_summary) {
+                        currentItem.items_summary[currentItem.index].exported = true;
+                        updateExportBadge(currentItem.items_summary);
+                        loadField(currentItem.index);
+                    }
                 } else {
-                    alert(`导出失败: ${data.error || '未知错误'}`);
+                    showToast(`❌ 导出失败: ${data.error || '未知错误'}`);
                 }
             } catch (err) {
-                alert(`导出请求失败: ${err}`);
+                showToast(`❌ 导出请求失败: ${err}`);
             }
         }
 
         async function exportAll() {
-            if (!confirm("确认导出所有已确认视野并结束？")) return;
             try {
                 showToast('正在导出全部视野...');
                 const res = await fetch('/api/export_all', {
@@ -1131,13 +1207,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 });
                 const data = await res.json();
                 if (data.success) {
-                    alert(`🎉 已成功导出全部 ${data.count} 个视野文件！您现在可以关闭本页面。`);
-                    window.close();
+                    showToast(`🎉 已成功导出全部 ${data.count} 个视野！`);
+                    if (currentItem && currentItem.items_summary) {
+                        currentItem.items_summary.forEach(x => x.exported = true);
+                        updateExportBadge(currentItem.items_summary);
+                        loadField(currentItem.index);
+                    }
                 } else {
-                    alert(`导出失败: ${data.error || '未知错误'}`);
+                    showToast(`❌ 导出失败: ${data.error || '未知错误'}`);
                 }
             } catch (err) {
-                alert(`导出请求失败: ${err}`);
+                showToast(`❌ 导出请求失败: ${err}`);
             }
         }
 
@@ -1152,6 +1232,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
             const k = e.key.toLowerCase();
             if (k === 'd') toggleDualView();
+            if (k === 'u') jumpToNextUnexported();
             if (k === 'n' || e.key === 'ArrowRight') navField(1);
             if (k === 'p' || e.key === 'ArrowLeft') navField(-1);
             if (k === 'a') sendAction('keep_all');

@@ -61,6 +61,7 @@ class ReviewItem:
     # 筛选状态
     rejected: set[int] = field(default_factory=set)
     reviewed: bool = False
+    exported: bool = False
     notes: str = ""
 
     def all_ids(self) -> list[int]:
