@@ -207,15 +207,16 @@ class WebReviewServer:
             cy, cx = prop.centroid
             area = int(prop.area)
 
-            # 极速优化：只在 cell 的 bounding box 局部小图上计算轮廓，速度提升 1000 倍！
+            # 1 像素 0-padding 确保 find_contours 永远生成完整封闭、极致光滑的完美细胞轮廓，无断裂折线
             sub_mask = labels[prop.slice] == cid
-            raw_contours = find_contours(sub_mask.astype(float), 0.5)
-            ymin, xmin = prop.slice[0].start, prop.slice[1].start
+            padded_mask = np.pad(sub_mask, 1, mode="constant", constant_values=0)
+            raw_contours = find_contours(padded_mask.astype(float), 0.5)
+            ymin, xmin = prop.slice[0].start - 1, prop.slice[1].start - 1
 
             formatted_contours = []
             for c in raw_contours:
                 formatted_contours.append(
-                    [[round(float(pt[1] + xmin), 1), round(float(pt[0] + ymin), 1)] for pt in c[::2]]
+                    [[round(float(pt[1] + xmin), 1), round(float(pt[0] + ymin), 1)] for pt in c]
                 )
 
             contours_dict[str(cid)] = formatted_contours
