@@ -125,6 +125,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="忽略已有分割缓存，强制重新跑 Cellpose",
     )
+    p.add_argument(
+        "--gui",
+        default="web",
+        choices=["web", "matplotlib"],
+        help="人工审核界面类型：web (默认, 调起 Web 前端支持放大/平移/消除边框/勾选) | matplotlib",
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Web GUI 界面本地端口（默认 8080）",
+    )
     return p
 
 
@@ -203,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             image_ids=args.ids,
             reuse_cache=not args.no_cache,
+            gui=args.gui,
+            port=args.port,
         )
     except Exception as e:
         print(f"运行失败: {e}", file=sys.stderr)

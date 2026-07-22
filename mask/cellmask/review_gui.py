@@ -79,10 +79,31 @@ class ReviewItem:
         self.rejected = set()
         self.apply_auto_flags(border=True, scalebar=True)
 
+    def merge_cells(self, id1: int, id2: int) -> bool:
+        """合并两个细胞：将 id2 合并进 id1，消除分隔边框。"""
+        id1, id2 = int(id1), int(id2)
+        if id1 == id2 or id1 <= 0 or id2 <= 0:
+            return False
+        if not np.any(self.labels == id1) or not np.any(self.labels == id2):
+            return False
+        self.labels[self.labels == id2] = id1
+        if id2 in self.rejected:
+            self.rejected.remove(id2)
+        if id2 in self.border_ids and id1 not in self.border_ids:
+            self.border_ids.append(id1)
+        if id2 in self.border_ids:
+            self.border_ids = [x for x in self.border_ids if x != id2]
+        if id2 in self.scalebar_ids and id1 not in self.scalebar_ids:
+            self.scalebar_ids.append(id1)
+        if id2 in self.scalebar_ids:
+            self.scalebar_ids = [x for x in self.scalebar_ids if x != id2]
+        return True
+
     def filtered_labels(self) -> np.ndarray:
         from .segment import renumber_labels
 
         return renumber_labels(self.labels, self.kept_ids())
+
 
 
 class MaskReviewer:

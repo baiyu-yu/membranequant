@@ -163,6 +163,8 @@ def run_pipeline(
     limit: int | None = None,
     image_ids: list[str] | None = None,
     reuse_cache: bool = True,
+    gui: str = "web",
+    port: int = 8080,
 ) -> dict[str, Any]:
     """完整流程入口。
 
@@ -177,6 +179,8 @@ def run_pipeline(
     limit : 只处理前 N 个视野（调试用）
     image_ids : 只处理指定 image_id 列表
     reuse_cache : 复用 out_dir/cache 中的分割结果
+    gui : web (默认, 调起 Web 前端) | matplotlib
+    port : Web GUI 尝试端口 (默认 8080)
     """
     input_dir = Path(input_dir)
     out_dir = Path(out_dir)
@@ -252,17 +256,31 @@ def run_pipeline(
 
     print("\n打开人工筛选窗口……")
     print("论文写法参考: Segmentation results were manually inspected and corrected.\n")
-    # 提前配置中文字体，避免窗口标题/状态栏 DejaVu 缺字警告
-    from .fonts import setup_chinese_font
 
-    setup_chinese_font(silent=False)
-    reviewer = MaskReviewer(
-        items,
-        on_export_one=_export_one,
-        on_export_all=_export_all,
-        auto_flag_on_start=auto_flag,
-    )
-    reviewed_items = reviewer.run()
+    if (gui or "web").lower() == "matplotlib":
+        # 提前配置中文字体，避免窗口标题/状态栏 DejaVu 缺字警告
+        from .fonts import setup_chinese_font
+
+        setup_chinese_font(silent=False)
+        reviewer = MaskReviewer(
+            items,
+            on_export_one=_export_one,
+            on_export_all=_export_all,
+            auto_flag_on_start=auto_flag,
+        )
+        reviewed_items = reviewer.run()
+    else:
+        from .web_gui import WebReviewServer
+
+        web_server = WebReviewServer(
+            items,
+            on_export_one=_export_one,
+            on_export_all=_export_all,
+            auto_flag_on_start=auto_flag,
+            port=port,
+        )
+        reviewed_items = web_server.start_and_wait()
+
     # 关闭窗口后若尚未导出，再导出一次
     paths = export_all(reviewed_items, out_dir, only_reviewed=False)
     return {
@@ -272,3 +290,4 @@ def run_pipeline(
         "reviewed": True,
         "n_kept_total": sum(len(it.kept_ids()) for it in reviewed_items),
     }
+

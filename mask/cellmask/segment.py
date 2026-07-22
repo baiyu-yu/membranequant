@@ -280,3 +280,26 @@ def renumber_labels(labels: np.ndarray, keep_ids: set[int] | list[int]) -> np.nd
         out[mask] = next_id
         next_id += 1
     return out
+
+
+def merge_cell_labels(labels: np.ndarray, keep_id: int, remove_id: int) -> np.ndarray:
+    """合并两个细胞：将 remove_id 替换为 keep_id，消除它们之间的分隔边框。"""
+    out = labels.copy()
+    out[out == int(remove_id)] = int(keep_id)
+    return out
+
+
+def find_adjacent_cells_at(
+    labels: np.ndarray, y: int, x: int, radius: int = 5
+) -> list[int]:
+    """给定图像中的 (y, x) 坐标，在该坐标附近的正方形区域内查找涉及的不同 Cell ID 列表。"""
+    h, w = labels.shape
+    y_min = max(0, int(y) - radius)
+    y_max = min(h, int(y) + radius + 1)
+    x_min = max(0, int(x) - radius)
+    x_max = min(w, int(x) + radius + 1)
+
+    patch = labels[y_min:y_max, x_min:x_max]
+    unique_ids = [int(cid) for cid in np.unique(patch) if cid != 0]
+    return unique_ids
+
