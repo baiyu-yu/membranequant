@@ -986,6 +986,36 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     ctxLeft.fillText(c.id.toString(), cx, cy);
                 }
             });
+
+            // 渲染鼠标悬停提示高亮 (Hover Highlight)
+            if (hoveredCell) {
+                const isKept = !rejectedSet.has(hoveredCell.id);
+                const contours = currentItem.geom.contours[hoveredCell.id.toString()] || [];
+                contours.forEach(poly => {
+                    if (poly.length === 0) return;
+                    ctxLeft.beginPath();
+                    ctxLeft.moveTo(poly[0][0], poly[0][1]);
+                    for (let i = 1; i < poly.length; i++) {
+                        ctxLeft.lineTo(poly[i][0], poly[i][1]);
+                    }
+                    ctxLeft.closePath();
+
+                    ctxLeft.fillStyle = 'rgba(251, 191, 36, 0.4)';
+                    ctxLeft.fill();
+
+                    ctxLeft.strokeStyle = '#fbbf24';
+                    ctxLeft.lineWidth = 3.0 / zoom;
+                    ctxLeft.stroke();
+                });
+
+                const [cx, cy] = hoveredCell.centroid;
+                const tooltipText = isKept ? `点击 剔除 #${hoveredCell.id}` : `点击 保留 #${hoveredCell.id}`;
+                ctxLeft.font = `bold ${Math.max(11, 13 / zoom)}px sans-serif`;
+                ctxLeft.fillStyle = '#fef08a';
+                ctxLeft.textAlign = 'center';
+                ctxLeft.textBaseline = 'bottom';
+                ctxLeft.fillText(tooltipText, cx, cy - 10 / zoom);
+            }
             ctxLeft.restore();
 
             // 2. 渲染右屏 (纯原图对比屏：100% 同步视角，无 Mask 掩码)
@@ -1014,6 +1044,30 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
+        let hoveredCell = null;
+        let mouseDownPos = { x: 0, y: 0 };
+
+        panelLeft.addEventListener('mousemove', (e) => {
+            if (isDragging) return;
+            const rect = panelLeft.getBoundingClientRect();
+            const canvasX = (e.clientX - rect.left - panX) / zoom;
+            const canvasY = (e.clientY - rect.top - panY) / zoom;
+
+            const cell = findCellAt(canvasX, canvasY);
+            if (cell !== hoveredCell) {
+                hoveredCell = cell;
+                panelLeft.style.cursor = cell ? 'pointer' : 'grab';
+                renderAllCanvases();
+            }
+        });
+
+        panelLeft.addEventListener('mouseleave', () => {
+            if (hoveredCell) {
+                hoveredCell = null;
+                renderAllCanvases();
+            }
+        });
+
         // 双屏像素级同步滚轮与平移事件绑定
         [panelLeft, panelRight].forEach(targetPanel => {
             targetPanel.addEventListener('wheel', (e) => {
@@ -1031,22 +1085,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             });
 
             targetPanel.addEventListener('mousedown', (e) => {
-                if (e.button === 1 || e.button === 2 || e.shiftKey) {
-                    isDragging = true;
-                    dragStartX = e.clientX - panX;
-                    dragStartY = e.clientY - panY;
-                } else if (e.button === 0 && targetPanel === panelLeft) {
-                    const rect = panelLeft.getBoundingClientRect();
-                    const canvasX = (e.clientX - rect.left - panX) / zoom;
-                    const canvasY = (e.clientY - rect.top - panY) / zoom;
+                isDragging = true;
+                mouseDownPos = { x: e.clientX, y: e.clientY };
+                dragStartX = e.clientX - panX;
+                dragStartY = e.clientY - panY;
+            });
 
-                    if (currentTool === 'toggle') {
-                        const clickedCell = findCellAt(canvasX, canvasY);
-                        if (clickedCell) toggleCellLocal(clickedCell.id);
-                    } else if (currentTool === 'merge') {
-                        mergeBorderAt(canvasX, canvasY);
+            targetPanel.addEventListener('mouseup', (e) => {
+                if (e.button === 0 && targetPanel === panelLeft) {
+                    const distMoved = Math.hypot(e.clientX - mouseDownPos.x, e.clientY - mouseDownPos.y);
+                    if (distMoved < 6) { // 纯点击触发圈内直接剔除/保留
+                        const rect = panelLeft.getBoundingClientRect();
+                        const canvasX = (e.clientX - rect.left - panX) / zoom;
+                        const canvasY = (e.clientY - rect.top - panY) / zoom;
+
+                        if (currentTool === 'toggle') {
+                            const clickedCell = findCellAt(canvasX, canvasY);
+                            if (clickedCell) {
+                                toggleCellLocal(clickedCell.id);
+                                showToast(rejectedSet.has(clickedCell.id) ? `❌ 已剔除细胞 #${clickedCell.id}` : `✅ 已保留细胞 #${clickedCell.id}`);
+                            }
+                        } else if (currentTool === 'merge') {
+                            mergeBorderAt(canvasX, canvasY);
+                        }
                     }
                 }
+                isDragging = false;
             });
 
             targetPanel.addEventListener('mousemove', (e) => {
@@ -1064,14 +1128,29 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         panelRight.addEventListener('contextmenu', e => e.preventDefault());
 
         function findCellAt(x, y) {
-            if (!currentItem) return null;
+            if (!currentItem || !currentItem.geom) return null;
+
+            // 1. 精确多边形内部 Ray-casting 判定
             for (const c of currentItem.geom.cells) {
                 const contours = currentItem.geom.contours[c.id.toString()] || [];
                 for (const poly of contours) {
                     if (pointInPoly(x, y, poly)) return c;
                 }
             }
-            return null;
+
+            // 2. 智能容错判定：点击质心/编号/附近 20px 范围内的细胞
+            let bestCell = null;
+            let minDistance = Infinity;
+            for (const c of currentItem.geom.cells) {
+                const [cx, cy] = c.centroid;
+                const dist = Math.hypot(x - cx, y - cy);
+                const approxRadius = Math.max(16, Math.sqrt(c.area / Math.PI) * 1.25);
+                if (dist <= approxRadius && dist < minDistance) {
+                    minDistance = dist;
+                    bestCell = c;
+                }
+            }
+            return bestCell;
         }
 
         function pointInPoly(x, y, poly) {
