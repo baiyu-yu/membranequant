@@ -387,7 +387,7 @@ def build_rgb_overlay(
     labels: np.ndarray,
     rejected: set[int] | None = None,
 ) -> np.ndarray:
-    """生成 RGB 叠加预览图（用于保存 overlay）。"""
+    """生成 RGB 叠加预览图（极速向量化计算）。"""
     rejected = rejected or set()
     base = np.asarray(image, dtype=np.float32)
     if base.ndim == 2:
@@ -400,18 +400,26 @@ def build_rgb_overlay(
 
     boundaries_keep = np.zeros(base.shape[:2], dtype=bool)
     boundaries_rej = np.zeros(base.shape[:2], dtype=bool)
-    for cid in np.unique(labels):
-        cid = int(cid)
-        if cid == 0:
-            continue
-        mask = labels == cid
-        b = find_boundaries(mask, mode="outer")
-        if cid in rejected:
-            boundaries_rej |= b
+
+    if labels.size > 0:
+        labels_int = labels.astype(np.int32, copy=False)
+        if rejected:
+            rej_list = [int(x) for x in rejected]
+            rej_mask = np.isin(labels_int, rej_list)
+
+            keep_labels = labels_int.copy()
+            keep_labels[rej_mask] = 0
+
+            rej_labels = labels_int.copy()
+            rej_labels[~rej_mask] = 0
+
+            boundaries_keep = find_boundaries(keep_labels, mode="outer")
+            boundaries_rej = find_boundaries(rej_labels, mode="outer")
         else:
-            boundaries_keep |= b
+            boundaries_keep = find_boundaries(labels_int, mode="outer")
 
     out = rgb.copy()
     out[boundaries_keep] = (0.15, 1.0, 0.25)
     out[boundaries_rej] = (1.0, 0.2, 0.2)
     return np.clip(out, 0, 1)
+

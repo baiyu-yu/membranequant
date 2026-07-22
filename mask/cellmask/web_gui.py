@@ -1,11 +1,14 @@
-"""Web 前端交互界面：极速响应版 REST API + Canvas 交互。
+"""Web 前端交互界面：双屏同步对比 + 0 延迟极速 Canvas 交互。
 
-性能与体验优化：
-1. 0 延迟本地即时更新：点击/勾选取消细胞瞬间完成（0ms 延迟），无网络卡顿。
-2. 背景图与轮廓缓存：避免重复生成 Base64 PNG 和计算 find_contours，大幅降低 CPU 开销。
-3. 状态异步同步：取消勾选时仅传输几字节 ID 状态，彻底解决连续勾选被重置的竞争问题。
-4. 明确的导出提示：点击“导出本张”弹出明确的提示框与导出路径。
-5. 搜索过滤：支持在侧边栏搜索框快速过滤 Cell ID。
+功能亮点：
+1. 双屏同步对比 (Dual View Synchronized Mode)：
+   - 一键开启双屏左右对比 (支持按 d 快捷键切换)。
+   - 左屏显示 Mask 掩码与边框编辑工具，右屏同步显示 100% 纯荧光原图。
+   - 滚轮放大、按住平移自动像素级 1:1 双屏联动！
+2. 0 延迟即时勾选与状态同步：点击/取消勾选瞬间响应 (0ms)，后台异步极速同步。
+3. 删除/合并分割边框 (Merge Border)：点击交界分割线，消除边框合并细胞。
+4. 明确的导出与路径反馈：点击导出弹窗展示生成的 `.tif` 掩码及文件存放路径。
+5. 搜索定位：侧边栏搜索框快速筛选 Cell ID。
 """
 
 from __future__ import annotations
@@ -56,7 +59,7 @@ def _arr_to_base64_png(arr: np.ndarray) -> str:
 
 
 class WebReviewServer:
-    """CellMask 本地 Web 服务器（极速缓存版）。"""
+    """CellMask 本地 Web 服务器（双屏同步对比版）。"""
 
     def __init__(
         self,
@@ -79,7 +82,6 @@ class WebReviewServer:
         self.server_thread: threading.Thread | None = None
         self._finished = False
 
-        # 内存缓存
         self._bg_cache: dict[str, dict[str, str]] = {}
         self._geom_cache: dict[str, dict] = {}
 
@@ -173,6 +175,7 @@ class WebReviewServer:
         bgs = self._get_bg_images(item)
         geom = self._get_geom_metadata(item)
 
+        summary = [{"index": i, "image_id": it.image_id} for i, it in enumerate(self.items)]
         return {
             "index": idx,
             "total": len(self.items),
@@ -187,6 +190,7 @@ class WebReviewServer:
             "bg_green": bgs["bg_green"],
             "bg_merge": bgs["bg_merge"],
             "geom": geom,
+            "items_summary": summary,
         }
 
     def start_and_wait(self) -> list[ReviewItem]:
@@ -255,7 +259,6 @@ class WebReviewServer:
                 item = reviewer_self.items[idx]
                 item.reviewed = True
 
-                # 轻量级切换接口：仅更新并返回 rejected 集合，不重发大图片
                 if path in ("/api/toggle_cell", "/api/set_cell_status"):
                     cid = int(data.get("cell_id", 0))
                     if path == "/api/toggle_cell":
@@ -288,7 +291,6 @@ class WebReviewServer:
                             merged = item.merge_cells(id1, id2)
 
                     if merged:
-                        # 重新计算 geom 缓存
                         reviewer_self._get_geom_metadata(item, force_recompute=True)
 
                     self._send_json(
@@ -364,7 +366,7 @@ class WebReviewServer:
 
         url = f"http://127.0.0.1:{self.port}"
         print(f"\n==============================================")
-        print(f"  CellMask Web 极速交互界面已启动!")
+        print(f"  CellMask Web 双屏同步对比界面已启动!")
         print(f"  访问地址: {url}")
         print(f"==============================================\n")
 
@@ -401,7 +403,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CellMask 极速审核与边框编辑</title>
+    <title>CellMask 极速审核与双屏同步对比</title>
     <style>
         :root {
             --bg-dark: #121418;
@@ -444,11 +446,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         main { flex: 1; display: flex; overflow: hidden; position: relative; }
 
-        .canvas-container {
-            flex: 1; position: relative; background: #0a0c0e; overflow: hidden; cursor: grab; user-select: none;
+        /* Workspace & Panels */
+        .canvas-workspace {
+            flex: 1; display: flex; position: relative; background: #0a0c0e; overflow: hidden; gap: 2px;
         }
-        .canvas-container:active { cursor: grabbing; }
+        .canvas-panel {
+            flex: 1; position: relative; height: 100%; overflow: hidden; cursor: grab; user-select: none; background: #0a0c0e;
+        }
+        .canvas-panel:active { cursor: grabbing; }
         canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+
+        .panel-tag {
+            position: absolute; top: 12px; right: 16px; background: rgba(18, 21, 25, 0.85); backdrop-filter: blur(6px);
+            padding: 4px 10px; border-radius: 4px; font-size: 11px; color: #d1d5db; border: 1px solid rgba(255,255,255,0.1);
+            pointer-events: none; z-index: 8; display: flex; align-items: center; gap: 6px;
+        }
 
         .floating-tools {
             position: absolute; top: 16px; left: 16px; background: rgba(28, 32, 38, 0.85); backdrop-filter: blur(8px);
@@ -515,7 +527,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="top-controls">
             <button class="btn" onclick="navField(-1)">◀ 上一张 (p)</button>
-            <span id="page-indicator" style="font-size:13px; color:#9ca3af;">1 / 1</span>
+            <select id="field-select" onchange="loadField(parseInt(this.value))" style="background:#2a313d; color:#fff; border:1px solid #374151; border-radius:6px; padding:4px 8px; font-size:13px; cursor:pointer;">
+                <option value="0">1 / 1</option>
+            </select>
             <button class="btn" onclick="navField(1)">下一张 (n) ▶</button>
             <div style="width: 1px; height: 20px; background: var(--panel-border);"></div>
             <button class="btn btn-primary" onclick="exportOne()">导出本张</button>
@@ -527,11 +541,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="floating-tools">
             <button class="tool-btn active" id="tool-toggle" onclick="setTool('toggle')" title="切换保留/剔除模式 (点击细胞)">👆</button>
             <button class="tool-btn" id="tool-merge" onclick="setTool('merge')" title="删除分割边框 / 合并细胞模式 (点击分割线)">✂️</button>
+            <button class="tool-btn" id="tool-dual" onclick="toggleDualView()" title="开启/关闭 左右双屏同步对比 (按 d 键)">🖼️</button>
             <button class="tool-btn" onclick="resetZoom()" title="重置视角 (Fit Screen)">🔍</button>
         </div>
 
-        <div class="canvas-container" id="canvas-container">
-            <canvas id="main-canvas"></canvas>
+        <div class="canvas-workspace" id="canvas-workspace">
+            <div class="canvas-panel" id="panel-left">
+                <div class="panel-tag" id="tag-left">✏️ 编辑视窗 (Mask 掩码)</div>
+                <canvas id="main-canvas"></canvas>
+            </div>
+            <div class="canvas-panel" id="panel-right" style="display: none; border-left: 2px solid var(--panel-border);">
+                <div class="panel-tag" id="tag-right">🖼️ 纯原图对比 (无掩码)</div>
+                <canvas id="raw-canvas"></canvas>
+            </div>
         </div>
 
         <aside>
@@ -564,7 +586,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </div>
 
             <div class="sidebar-section">
-                <div class="section-title">显示设置</div>
+                <div class="section-title">显示与双屏对比设置</div>
+                <div class="toggle-row">
+                    <span>双屏同步对比 (d)</span>
+                    <label class="switch">
+                        <input type="checkbox" id="dual-view-toggle" onchange="toggleDualView()">
+                        <span class="slider"></span>
+                    </label>
+                </div>
                 <div class="toggle-row">
                     <span>背景衬底</span>
                     <select id="channel-select" onchange="changeChannel()" style="background:#2a313d; color:#fff; border:1px solid #374151; border-radius:4px; padding:2px 6px;">
@@ -576,20 +605,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="toggle-row">
                     <span>显示编号 (i)</span>
                     <label class="switch">
-                        <input type="checkbox" id="show-ids" checked onchange="renderCanvas()">
+                        <input type="checkbox" id="show-ids" checked onchange="renderAllCanvases()">
                         <span class="slider"></span>
                     </label>
                 </div>
                 <div class="toggle-row">
                     <span>显示剔除轮廓 (x)</span>
                     <label class="switch">
-                        <input type="checkbox" id="show-rejected" checked onchange="renderCanvas()">
+                        <input type="checkbox" id="show-rejected" checked onchange="renderAllCanvases()">
                         <span class="slider"></span>
                     </label>
                 </div>
                 <div class="toggle-row">
                     <span>Mask 透明度</span>
-                    <input type="range" id="opacity-slider" min="0.1" max="0.8" step="0.05" value="0.3" oninput="renderCanvas()" style="width:90px;">
+                    <input type="range" id="opacity-slider" min="0.1" max="0.8" step="0.05" value="0.3" oninput="renderAllCanvases()" style="width:90px;">
                 </div>
             </div>
 
@@ -605,17 +634,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <script>
         let currentItem = null;
-        let rejectedSet = new Set(); // 本地权威 剔除 Set，0 延迟更新
+        let rejectedSet = new Set();
         let currentTool = 'toggle';
         let currentChannel = 'red';
+        let isDualView = false;
+
         let zoom = 1.0;
         let panX = 0, panY = 0;
         let isDragging = false;
         let dragStartX = 0, dragStartY = 0;
 
-        const container = document.getElementById('canvas-container');
-        const canvas = document.getElementById('main-canvas');
-        const ctx = canvas.getContext('2d');
+        const panelLeft = document.getElementById('panel-left');
+        const panelRight = document.getElementById('panel-right');
+        const canvasLeft = document.getElementById('main-canvas');
+        const canvasRight = document.getElementById('raw-canvas');
+        const ctxLeft = canvasLeft.getContext('2d');
+        const ctxRight = canvasRight.getContext('2d');
+
         const bgImages = { red: new Image(), green: new Image(), merge: new Image() };
 
         async function loadField(index = 0) {
@@ -627,18 +662,33 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 currentItem = data;
                 rejectedSet = new Set(data.rejected_ids || []);
 
+                const badgeText = `${data.image_id} [源: 红通道]`;
+                document.getElementById('image-id-tag').innerText = badgeText;
+
+                const selectEl = document.getElementById('field-select');
+                if (data.items_summary) {
+                    selectEl.innerHTML = '';
+                    data.items_summary.forEach((it, idx) => {
+                        const opt = document.createElement('option');
+                        opt.value = idx;
+                        opt.innerText = `[${idx + 1}/${data.total}] ${it.image_id}`;
+                        if (idx === data.index) opt.selected = true;
+                        selectEl.appendChild(opt);
+                    });
+                }
+
                 if (data.bg_red) {
-                    bgImages.red.onload = () => renderCanvas();
+                    bgImages.red.onload = () => renderAllCanvases();
                     bgImages.red.src = data.bg_red;
                 }
                 if (data.bg_green) {
-                    bgImages.green.onload = () => renderCanvas();
+                    bgImages.green.onload = () => renderAllCanvases();
                     bgImages.green.src = data.bg_green;
                 } else {
                     bgImages.green.src = '';
                 }
                 if (data.bg_merge) {
-                    bgImages.merge.onload = () => renderCanvas();
+                    bgImages.merge.onload = () => renderAllCanvases();
                     bgImages.merge.src = data.bg_merge;
                 } else {
                     bgImages.merge.src = '';
@@ -647,10 +697,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 resetZoom();
                 updateSidebarStats();
                 renderCellList();
-                renderCanvas();
+                renderAllCanvases();
             } catch (err) {
                 console.error("加载失败", err);
+                alert("切换视野失败: " + err);
             }
+        }
+
+        function toggleDualView() {
+            isDualView = !isDualView;
+            document.getElementById('dual-view-toggle').checked = isDualView;
+            document.getElementById('tool-dual').classList.toggle('active', isDualView);
+            panelRight.style.display = isDualView ? 'block' : 'none';
+
+            showToast(isDualView ? '已开启双屏同步对比 (左右放大/平移自动像素级联动)' : '已关闭双屏对比');
+            resetZoom();
+            renderAllCanvases();
         }
 
         function setTool(tool) {
@@ -662,21 +724,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         function changeChannel() {
             currentChannel = document.getElementById('channel-select').value;
-            renderCanvas();
+            renderAllCanvases();
         }
 
         function resetZoom() {
             if (!currentItem) return;
             const w = currentItem.geom.width;
             const h = currentItem.geom.height;
-            const cw = container.clientWidth;
-            const ch = container.clientHeight;
+            const activeContainer = panelLeft;
+            const cw = activeContainer.clientWidth;
+            const ch = activeContainer.clientHeight;
 
             const scale = Math.min(cw / w, ch / h) * 0.92;
             zoom = scale;
             panX = (cw - w * scale) / 2;
             panY = (ch - h * scale) / 2;
-            renderCanvas();
+            renderAllCanvases();
         }
 
         function updateSidebarStats() {
@@ -736,7 +799,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (lbl) lbl.style.color = isKept ? '#34d399' : '#f87171';
         }
 
-        // 0ms 纯前端即时更新
         function toggleCellLocal(cellId) {
             if (rejectedSet.has(cellId)) {
                 rejectedSet.delete(cellId);
@@ -745,8 +807,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
             updateCellRowUI(cellId);
             updateSidebarStats();
-            renderCanvas();
-            // 后台异步同步给后端
+            renderAllCanvases();
             fetch('/api/toggle_cell', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -762,8 +823,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
             updateCellRowUI(cellId);
             updateSidebarStats();
-            renderCanvas();
-            // 后台异步同步
+            renderAllCanvases();
             fetch('/api/set_cell_status', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -771,31 +831,33 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             });
         }
 
-        function renderCanvas() {
+        function renderAllCanvases() {
             if (!currentItem) return;
 
             const w = currentItem.geom.width;
             const h = currentItem.geom.height;
-            canvas.width = container.clientWidth;
-            canvas.height = container.clientHeight;
-
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.save();
-            ctx.translate(panX, panY);
-            ctx.scale(zoom, zoom);
-
             const img = bgImages[currentChannel] && bgImages[currentChannel].complete ? bgImages[currentChannel] : bgImages.red;
+
+            // 1. 渲染左屏 (编辑屏：背景 + Mask 填充 + 轮廓 + ID)
+            canvasLeft.width = panelLeft.clientWidth;
+            canvasLeft.height = panelLeft.clientHeight;
+
+            ctxLeft.clearRect(0, 0, canvasLeft.width, canvasLeft.height);
+            ctxLeft.save();
+            ctxLeft.translate(panX, panY);
+            ctxLeft.scale(zoom, zoom);
+
             if (img.complete) {
-                ctx.drawImage(img, 0, 0, w, h);
+                ctxLeft.drawImage(img, 0, 0, w, h);
             }
 
             if (currentItem.scale_box) {
                 const [y0, y1, x0, x1] = currentItem.scale_box;
-                ctx.strokeStyle = 'cyan';
-                ctx.lineWidth = 1 / zoom;
-                ctx.setLineDash([4 / zoom, 4 / zoom]);
-                ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
-                ctx.setLineDash([]);
+                ctxLeft.strokeStyle = 'cyan';
+                ctxLeft.lineWidth = 1 / zoom;
+                ctxLeft.setLineDash([4 / zoom, 4 / zoom]);
+                ctxLeft.strokeRect(x0, y0, x1 - x0, y1 - y0);
+                ctxLeft.setLineDash([]);
             }
 
             const showIds = document.getElementById('show-ids').checked;
@@ -811,76 +873,106 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                 contours.forEach(poly => {
                     if (poly.length === 0) return;
-                    ctx.beginPath();
-                    ctx.moveTo(poly[0][0], poly[0][1]);
+                    ctxLeft.beginPath();
+                    ctxLeft.moveTo(poly[0][0], poly[0][1]);
                     for (let i = 1; i < poly.length; i++) {
-                        ctx.lineTo(poly[i][0], poly[i][1]);
+                        ctxLeft.lineTo(poly[i][0], poly[i][1]);
                     }
-                    ctx.closePath();
+                    ctxLeft.closePath();
 
-                    ctx.fillStyle = isKept ? `rgba(34, 197, 94, ${opacity})` : `rgba(239, 68, 68, ${opacity * 0.7})`;
-                    ctx.fill();
+                    ctxLeft.fillStyle = isKept ? `rgba(34, 197, 94, ${opacity})` : `rgba(239, 68, 68, ${opacity * 0.7})`;
+                    ctxLeft.fill();
 
-                    ctx.strokeStyle = color;
-                    ctx.lineWidth = (isKept ? 1.8 : 1.2) / zoom;
-                    ctx.stroke();
+                    ctxLeft.strokeStyle = color;
+                    ctxLeft.lineWidth = (isKept ? 1.8 : 1.2) / zoom;
+                    ctxLeft.stroke();
                 });
 
                 if (showIds) {
                     const [cx, cy] = c.centroid;
-                    ctx.font = `bold ${Math.max(10, 12 / zoom)}px sans-serif`;
-                    ctx.fillStyle = isKept ? '#a7f3d0' : '#fca5a5';
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'middle';
-                    ctx.fillText(c.id.toString(), cx, cy);
+                    ctxLeft.font = `bold ${Math.max(10, 12 / zoom)}px sans-serif`;
+                    ctxLeft.fillStyle = isKept ? '#a7f3d0' : '#fca5a5';
+                    ctxLeft.textAlign = 'center';
+                    ctxLeft.textBaseline = 'middle';
+                    ctxLeft.fillText(c.id.toString(), cx, cy);
+                }
+            });
+            ctxLeft.restore();
+
+            // 2. 渲染右屏 (纯原图对比屏：100% 同步视角，无 Mask 掩码)
+            if (isDualView) {
+                canvasRight.width = panelRight.clientWidth;
+                canvasRight.height = panelRight.clientHeight;
+
+                ctxRight.clearRect(0, 0, canvasRight.width, canvasRight.height);
+                ctxRight.save();
+                ctxRight.translate(panX, panY);
+                ctxRight.scale(zoom, zoom);
+
+                if (img.complete) {
+                    ctxRight.drawImage(img, 0, 0, w, h);
+                }
+
+                if (currentItem.scale_box) {
+                    const [y0, y1, x0, x1] = currentItem.scale_box;
+                    ctxRight.strokeStyle = 'cyan';
+                    ctxRight.lineWidth = 1 / zoom;
+                    ctxRight.setLineDash([4 / zoom, 4 / zoom]);
+                    ctxRight.strokeRect(x0, y0, x1 - x0, y1 - y0);
+                    ctxRight.setLineDash([]);
+                }
+                ctxRight.restore();
+            }
+        }
+
+        // 双屏像素级同步滚轮与平移事件绑定
+        [panelLeft, panelRight].forEach(targetPanel => {
+            targetPanel.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
+                const rect = targetPanel.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+
+                panX = mouseX - (mouseX - panX) * zoomFactor;
+                panY = mouseY - (mouseY - panY) * zoomFactor;
+                zoom *= zoomFactor;
+
+                renderAllCanvases();
+            });
+
+            targetPanel.addEventListener('mousedown', (e) => {
+                if (e.button === 1 || e.button === 2 || e.shiftKey) {
+                    isDragging = true;
+                    dragStartX = e.clientX - panX;
+                    dragStartY = e.clientY - panY;
+                } else if (e.button === 0 && targetPanel === panelLeft) {
+                    const rect = panelLeft.getBoundingClientRect();
+                    const canvasX = (e.clientX - rect.left - panX) / zoom;
+                    const canvasY = (e.clientY - rect.top - panY) / zoom;
+
+                    if (currentTool === 'toggle') {
+                        const clickedCell = findCellAt(canvasX, canvasY);
+                        if (clickedCell) toggleCellLocal(clickedCell.id);
+                    } else if (currentTool === 'merge') {
+                        mergeBorderAt(canvasX, canvasY);
+                    }
                 }
             });
 
-            ctx.restore();
-        }
-
-        container.addEventListener('wheel', (e) => {
-            e.preventDefault();
-            const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
-            const mouseX = e.clientX - container.getBoundingClientRect().left;
-            const mouseY = e.clientY - container.getBoundingClientRect().top;
-
-            panX = mouseX - (mouseX - panX) * zoomFactor;
-            panY = mouseY - (mouseY - panY) * zoomFactor;
-            zoom *= zoomFactor;
-
-            renderCanvas();
-        });
-
-        container.addEventListener('mousedown', (e) => {
-            if (e.button === 1 || e.button === 2 || e.shiftKey) {
-                isDragging = true;
-                dragStartX = e.clientX - panX;
-                dragStartY = e.clientY - panY;
-            } else if (e.button === 0) {
-                const rect = container.getBoundingClientRect();
-                const canvasX = (e.clientX - rect.left - panX) / zoom;
-                const canvasY = (e.clientY - rect.top - panY) / zoom;
-
-                if (currentTool === 'toggle') {
-                    const clickedCell = findCellAt(canvasX, canvasY);
-                    if (clickedCell) toggleCellLocal(clickedCell.id);
-                } else if (currentTool === 'merge') {
-                    mergeBorderAt(canvasX, canvasY);
+            targetPanel.addEventListener('mousemove', (e) => {
+                if (isDragging) {
+                    panX = e.clientX - dragStartX;
+                    panY = e.clientY - dragStartY;
+                    renderAllCanvases();
                 }
-            }
-        });
-
-        container.addEventListener('mousemove', (e) => {
-            if (isDragging) {
-                panX = e.clientX - dragStartX;
-                panY = e.clientY - dragStartY;
-                renderCanvas();
-            }
+            });
         });
 
         window.addEventListener('mouseup', () => { isDragging = false; });
-        container.addEventListener('contextmenu', e => e.preventDefault());
+        window.addEventListener('resize', () => { renderAllCanvases(); });
+        panelLeft.addEventListener('contextmenu', e => e.preventDefault());
+        panelRight.addEventListener('contextmenu', e => e.preventDefault());
 
         function findCellAt(x, y) {
             if (!currentItem) return null;
@@ -918,7 +1010,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 showToast('✅ 已消除交界边框，成功合并细胞!');
                 updateSidebarStats();
                 renderCellList();
-                renderCanvas();
+                renderAllCanvases();
             } else {
                 showToast('⚠️ 未检测到要消除的共享边框');
             }
@@ -935,7 +1027,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 rejectedSet = new Set(data.rejected_ids || []);
                 updateSidebarStats();
                 renderCellList();
-                renderCanvas();
+                renderAllCanvases();
             }
         }
 
@@ -1003,6 +1095,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         window.addEventListener('keydown', (e) => {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
             const k = e.key.toLowerCase();
+            if (k === 'd') toggleDualView();
             if (k === 'n' || e.key === 'ArrowRight') navField(1);
             if (k === 'p' || e.key === 'ArrowLeft') navField(-1);
             if (k === 'a') sendAction('keep_all');
@@ -1012,12 +1105,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (k === 'i') {
                 const el = document.getElementById('show-ids');
                 el.checked = !el.checked;
-                renderCanvas();
+                renderAllCanvases();
             }
             if (k === 'x') {
                 const el = document.getElementById('show-rejected');
                 el.checked = !el.checked;
-                renderCanvas();
+                renderAllCanvases();
             }
         });
 

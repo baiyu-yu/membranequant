@@ -67,6 +67,20 @@ def export_item(
 
     paths: dict[str, Path] = {"mask": mask_path}
 
+    # 1. 导出彩图版 mask PNG (解决 Windows 默认看图查看是纯黑问题)
+    colored_mask_path = mask_dir / f"{stem}_mask_colored.png"
+    export_colored_mask_png(labels_out, colored_mask_path)
+    paths["mask_colored"] = colored_mask_path
+
+    # 2. 导出 Fiji / ImageJ 直接拖拽可用的 ROI.zip 文件
+    rois_dir = out_dir / "rois"
+    roi_zip_path = rois_dir / f"{stem}_rois.zip"
+    try:
+        export_imagej_rois_zip(labels_out, roi_zip_path)
+        paths["rois_zip"] = roi_zip_path
+    except Exception as e:
+        print(f"[warn] ImageJ ROI.zip 导出失败 {stem}: {e}")
+
     if save_overlay:
         try:
             overlay = build_rgb_overlay(item.image, item.labels, item.rejected)
@@ -194,3 +208,88 @@ def export_all(
     print(f"导出完成 → {out_dir}")
     print(f"  masks: {len(exported_masks)}  summary: {summary_path.name}")
     return exported_masks
+
+
+def _build_imagej_roi_bytes(name: str, contour: np.ndarray) -> bytes:
+    """构建 ImageJ 二进制 Polygon ROI 文件内容。contour 为 Nx2 [y, x] 坐标。"""
+    import sys
+
+    ys = contour[:, 0]
+    xs = contour[:, 1]
+    top, left = int(np.floor(ys.min())), int(np.floor(xs.min()))
+    bottom, right = int(np.ceil(ys.max())), int(np.ceil(xs.max()))
+
+    rel_xs = (xs - left).round().astype(np.int16)
+    rel_ys = (ys - top).round().astype(np.int16)
+    n_pts = len(rel_xs)
+
+    header = bytearray(64)
+    struct.pack_into(">4s", header, 0, b"Iout")
+    struct.pack_into(">H", header, 4, 227)
+    struct.pack_into(">H", header, 6, 0)
+    struct.pack_into(">h", header, 8, top)
+    struct.pack_into(">h", header, 10, left)
+    struct.pack_into(">h", header, 12, bottom)
+    struct.pack_into(">h", header, 14, right)
+    struct.pack_into(">H", header, 18, n_pts)
+
+    if sys.byteorder == "little":
+        rel_xs_be = rel_xs.byteswap()
+        rel_ys_be = rel_ys.byteswap()
+        x_bytes = rel_xs_be.tobytes()
+        y_bytes = rel_ys_be.tobytes()
+    else:
+        x_bytes = rel_xs.tobytes()
+        y_bytes = rel_ys.tobytes()
+
+    return bytes(header) + x_bytes + y_bytes
+
+
+def export_imagej_rois_zip(labels: np.ndarray, zip_path: Path) -> Path | None:
+    """生成 Fiji / ImageJ 直接支持拖拽导入 ROI Manager 的 .rois.zip 文件。"""
+    import zipfile
+    from skimage.measure import find_contours
+
+    unique_ids = [int(x) for x in np.unique(labels) if x != 0]
+    if not unique_ids:
+        return None
+
+    zip_path = Path(zip_path)
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(str(zip_path), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for idx, cid in enumerate(unique_ids, start=1):
+            mask = labels == cid
+            contours = find_contours(mask.astype(float), 0.5)
+            if not contours:
+                continue
+            c = max(contours, key=len)
+            roi_bytes = _build_imagej_roi_bytes(f"Cell-{cid}", c)
+            roi_filename = f"{idx:03d}-cell{cid:04d}.roi"
+            zf.writestr(roi_filename, roi_bytes)
+
+    return zip_path
+
+
+def export_colored_mask_png(labels: np.ndarray, png_path: Path) -> Path | None:
+    """导出伪彩标注版 mask PNG，解决 Windows 看图软件直接打开显示纯黑的问题。"""
+    h, w = labels.shape
+    unique_ids = [int(x) for x in np.unique(labels) if x != 0]
+    if not unique_ids:
+        rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    else:
+        np.random.seed(42)
+        max_id = max(unique_ids)
+        colors = np.random.randint(60, 255, size=(max_id + 1, 3), dtype=np.uint8)
+        colors[0] = [0, 0, 0]
+        rgb = colors[labels]
+
+    try:
+        from PIL import Image
+
+        png_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(rgb).save(str(png_path))
+    except Exception:
+        pass
+    return png_path
+
