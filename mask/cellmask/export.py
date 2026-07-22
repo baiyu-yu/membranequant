@@ -230,6 +230,8 @@ def export_all(
 
 def _build_imagej_roi_bytes(name: str, contour: np.ndarray) -> bytes:
     """构建 ImageJ 二进制 Polygon ROI 文件内容。contour 为 Nx2 [y, x] 坐标。"""
+    import struct
+
     ys = contour[:, 0]
     xs = contour[:, 1]
     top, left = int(np.floor(ys.min())), int(np.floor(xs.min()))
