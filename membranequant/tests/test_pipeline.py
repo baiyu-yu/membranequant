@@ -181,7 +181,7 @@ def test_generate_all_plots_and_outlier_filter(tmp_path: Path):
             cell_id += 1
 
     df = pd.DataFrame(rows)
-    summary_df = build_summary_from_results(df, metric="Ratio_T_over_R")
+    summary_df = build_summary_from_results(df, metric="RatioOfMeans_T_R")
     
     # Check that wd1 mean is not 3.5e13 / 20 = 1.75e12
     wd1_summary = summary_df[summary_df["Condition"] == "wd1"]
@@ -190,7 +190,7 @@ def test_generate_all_plots_and_outlier_filter(tmp_path: Path):
 
     # Generate all plots and verify 08_coloc_dashboard and all other 11 plots are created
     out_dir = tmp_path / "plot_test"
-    saved = generate_all_plots(df, summary_df, out_dir, metric="Ratio_T_over_R")
+    saved = generate_all_plots(df, summary_df, out_dir, metric="RatioOfMeans_T_R")
     assert len(saved) == 11
     coloc_file = out_dir / "plots" / "08_coloc_dashboard.png"
     assert coloc_file.is_file()

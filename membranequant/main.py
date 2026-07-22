@@ -209,7 +209,7 @@ def run_pipeline(
     results_path = out_dirs["csv"] / "results.csv"
     write_results_csv(df, results_path)
 
-    summary_df = write_summary_csv(df, out_dirs["csv"] / "summary.csv", metric="Ratio_T_over_R")
+    summary_df = write_summary_csv(df, out_dirs["csv"] / "summary.csv", metric="RatioOfMeans_T_R")
     write_summary_csv(df, out_dirs["csv"] / "summary_RatioOfMeans.csv", metric="RatioOfMeans_T_R")
     write_summary_csv(
         df, out_dirs["csv"] / "summary_Enrichment.csv", metric="Enrichment_Membrane_vs_Whole"
@@ -223,8 +223,8 @@ def run_pipeline(
     try:
         from .plots import generate_all_plots
 
-        generate_all_plots(df, summary_df, output_dir, metric="Ratio_T_over_R")
-        logger.info("Statistical plots generated in plots/")
+        generate_all_plots(df, summary_df, output_dir, metric="RatioOfMeans_T_R")
+        logger.info("Statistical plots generated in plots/ (Primary: RatioOfMeans_T_R)")
     except Exception as e:
         logger.warning("Failed to generate plots: %s", e)
         logger.debug(traceback.format_exc())

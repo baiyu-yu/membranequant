@@ -38,9 +38,9 @@ plt.rcParams["axes.unicode_minus"] = False
 PPT_DPI = 300
 
 METRIC_LABELS = {
-    "Ratio_T_over_R": "T/R 像素比 (Dual 膜区)",
-    "RatioOfMeans_T_R": "T/R 均值比 (Dual 膜区)",
-    "Enrichment_Membrane_vs_Whole": "膜/全细胞富集 (EGFP)",
+    "RatioOfMeans_T_R": "T/R 均值比 (Dual 膜区)【主终点】",
+    "Enrichment_Membrane_vs_Whole": "膜/全细胞富集 (EGFP)【辅助终点】",
+    "Ratio_T_over_R": "T/R 像素比 (Dual 膜区)【探索项】",
     "MembraneGreen": "膜区 EGFP 均值",
     "MembraneRed": "膜区 DiI 均值",
     "MembraneFraction": "膜区 EGFP 积分占比",
@@ -331,7 +331,7 @@ def plot_mc_comparison_bar(
 
     # 添加显著性标记
     if results_df is not None:
-        metric = summary_df["Metric"].iloc[0] if "Metric" in summary_df.columns else "Ratio_T_over_R"
+        metric = summary_df["Metric"].iloc[0] if "Metric" in summary_df.columns else "RatioOfMeans_T_R"
         conditions = list(df["Condition"].astype(str).values)
         clean_results = _ensure_condition(_pass_df(results_df))
         if "EdgeCenterRatio" in clean_results.columns:
@@ -349,7 +349,7 @@ def plot_mc_comparison_bar(
 def plot_metric_boxplot(
     results_df: pd.DataFrame,
     output_path: Path,
-    metric: str = "Ratio_T_over_R",
+    metric: str = "RatioOfMeans_T_R",
     title: str | None = None,
 ) -> None:
     """箱线图 + 单细胞散点。"""
@@ -425,7 +425,7 @@ def plot_mc_boxplot(
 def plot_metric_violin(
     results_df: pd.DataFrame,
     output_path: Path,
-    metric: str = "Ratio_T_over_R",
+    metric: str = "RatioOfMeans_T_R",
     title: str | None = None,
 ) -> None:
     """小提琴图（发表常用）。"""
@@ -488,9 +488,9 @@ def plot_multi_metric_bars(
     ensure_dir(output_path.parent)
     df = _ensure_condition(_pass_df(results_df))
     metrics = metrics or [
-        "Ratio_T_over_R",
         "RatioOfMeans_T_R",
         "Enrichment_Membrane_vs_Whole",
+        "Ratio_T_over_R",
         "MembraneGreen",
         "MembraneRed",
     ]
@@ -816,7 +816,7 @@ def plot_coloc_dashboard(
         _empty_fig(output_path, "无数据")
         return
 
-    dual_metrics = [m for m in ("Ratio_T_over_R", "RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole") if m in df.columns]
+    dual_metrics = [m for m in ("RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole", "Ratio_T_over_R") if m in df.columns]
     legacy_metrics = [m for m in ("Manders_M1", "PearsonWhole", "MEI") if m in df.columns]
     metrics = dual_metrics if dual_metrics else legacy_metrics
     if not metrics:
@@ -863,7 +863,7 @@ def plot_coloc_dashboard(
 
 def build_summary_from_results(
     results_df: pd.DataFrame,
-    metric: str = "Ratio_T_over_R",
+    metric: str = "RatioOfMeans_T_R",
     group_col: str = "Condition",
     filter_qc: bool = True,
 ) -> pd.DataFrame:
@@ -908,7 +908,7 @@ def generate_all_plots(
     results_df: pd.DataFrame,
     summary_df: pd.DataFrame,
     output_dir: Path,
-    metric: str = "Ratio_T_over_R",
+    metric: str = "RatioOfMeans_T_R",
 ) -> list[Path]:
     """生成所有统计图表，返回生成的文件路径列表。"""
     plots_dir = ensure_dir(Path(output_dir) / "plots")
@@ -950,7 +950,7 @@ def generate_all_plots(
 def plot_batch_effect_comparison(
     results_df: pd.DataFrame,
     output_path: Path,
-    metric: str = "Ratio_T_over_R",
+    metric: str = "RatioOfMeans_T_R",
     title: str | None = None,
 ) -> None:
     """绘制批次效应对比图（实验 104 vs 实验 w）。

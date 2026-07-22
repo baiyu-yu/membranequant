@@ -44,9 +44,9 @@ from membranequant.plots import (
 )
 
 METRIC_CHOICES = [
-    ("Ratio_T_over_R — T/R 像素比 (Dual 膜区)【推荐·DualCellQuant膜定位主指标】", "Ratio_T_over_R"),
-    ("RatioOfMeans_T_R — T/R 均值比 (Dual 膜区)", "RatioOfMeans_T_R"),
-    ("Enrichment_Membrane_vs_Whole — 膜/全细胞富集 (EGFP)", "Enrichment_Membrane_vs_Whole"),
+    ("RatioOfMeans_T_R — T/R 均值比 (Dual 膜区)【主终点·DualCellQuant论文标准】", "RatioOfMeans_T_R"),
+    ("Enrichment_Membrane_vs_Whole — 膜富集倍数【辅助终点·膜相对全细胞】", "Enrichment_Membrane_vs_Whole"),
+    ("Ratio_T_over_R — T/R 像素比 (Dual 膜区)【探索性指标】", "Ratio_T_over_R"),
     ("MembraneGreen — 膜区 EGFP 均值", "MembraneGreen"),
     ("MembraneRed — 膜区 DiI 均值", "MembraneRed"),
     ("MembraneFraction — 膜区 EGFP 积分占比", "MembraneFraction"),
@@ -75,9 +75,9 @@ def _pick_metric(df: pd.DataFrame, selected: str) -> str:
     if selected in df.columns and df[selected].notna().any():
         return selected
     for m in (
-        "Ratio_T_over_R",
         "RatioOfMeans_T_R",
         "Enrichment_Membrane_vs_Whole",
+        "Ratio_T_over_R",
         "MembraneGreen",
         "M/C_DiI",
         "MEI",
@@ -267,9 +267,9 @@ def build_gui():
 
 | 推荐指标 | 含义 | 何时用 |
 |---------|------|--------|
-| **Ratio_T_over_R** | Dual 膜区 T/R 像素级强度比值 | 膜募集/转位首选主指标 |
-| **RatioOfMeans_T_R** | Dual 膜区 Target均值 / Reference均值 | 均值层面的膜转位定量 |
-| **Enrichment_Membrane_vs_Whole** | 膜区 EGFP 均值 / 全细胞 EGFP 均值 | 膜/全细胞富集程度 |
+| **RatioOfMeans_T_R** *(主终点)* | Dual 膜区 Target均值 / Reference均值 | DualCellQuant 论文标准膜归一化比值（首选主指标） |
+| **Enrichment_Membrane_vs_Whole** *(辅助终点)* | 膜区 EGFP 均值 / 全细胞 EGFP 均值 | 评估 EGFP 相对全细胞/胞浆的膜富集倍数 |
+| **Ratio_T_over_R** *(探索指标)* | Dual 膜区 T/R 像素级强度比值 | 像素级比值均值（像素细粒度补充） |
 | **RedCoverage** | 膜区 DiI 信号覆盖率 | 质控 / 评估膜标志质量 |
 
 ### 🔬 统计学显著性与数据过滤标准
@@ -305,7 +305,7 @@ def build_gui():
                 )
                 metric_select = gr.Dropdown(
                     choices=METRIC_CHOICES,
-                    value="Ratio_T_over_R",
+                    value="RatioOfMeans_T_R",
                     label="主分析指标",
                 )
                 filter_qc = gr.Checkbox(label="仅统计 QC=pass 细胞", value=True)

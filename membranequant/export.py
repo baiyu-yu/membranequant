@@ -58,9 +58,9 @@ CSV_COLUMNS = [
 
 # Metrics exported to multi-metric summaries / GraphPad
 PRIMARY_METRICS = [
-    "Ratio_T_over_R",
-    "RatioOfMeans_T_R",
-    "Enrichment_Membrane_vs_Whole",
+    "RatioOfMeans_T_R",  # Primary Endpoint: Dual paper standard (mean_target_on_mask / mean_ref_on_mask)
+    "Enrichment_Membrane_vs_Whole",  # Secondary Endpoint: Membrane enrichment fold (mean_target_on_mask / mean_target_whole)
+    "Ratio_T_over_R",  # Exploratory: Pixel-wise mean ratio
     "MembraneGreen",
     "MembraneRed",
     "MembraneFraction",
@@ -92,7 +92,7 @@ def _sem(x: pd.Series) -> float:
     return float(x.std(ddof=1) / np.sqrt(n))
 
 
-def write_summary_csv(df: pd.DataFrame, path: Path, metric: str = "Ratio_T_over_R") -> pd.DataFrame:
+def write_summary_csv(df: pd.DataFrame, path: Path, metric: str = "RatioOfMeans_T_R") -> pd.DataFrame:
     """Summary of one metric for QC-pass cells, by Experiment + Drug + Group + Condition."""
     ensure_dir(path.parent)
     passed = df[df["QC"] == "pass"].copy() if "QC" in df.columns else df.copy()
@@ -100,9 +100,9 @@ def write_summary_csv(df: pd.DataFrame, path: Path, metric: str = "Ratio_T_over_
     if metric in ("Ratio_T_over_R", "RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole", "M/C_DiI", "M/C", "MEI"):
         passed = passed[(passed[metric].isna()) | ((passed[metric] > 0) & (passed[metric] <= 50.0))].copy()
 
-    # Prefer Dual T/R ratio; fall back to enrichment
+    # Prefer Dual T/R ratio of means; fall back to enrichment or pixel ratio
     if metric not in passed.columns or passed[metric].isna().all():
-        for fallback in ("Ratio_T_over_R", "RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole"):
+        for fallback in ("RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole", "Ratio_T_over_R"):
             if fallback in passed.columns and not passed[fallback].isna().all():
                 metric = fallback
                 break
@@ -205,7 +205,7 @@ def write_multi_metric_summary(df: pd.DataFrame, path: Path) -> pd.DataFrame:
     return out
 
 
-def write_graphpad_csv(df: pd.DataFrame, path: Path, metric: str = "Ratio_T_over_R") -> None:
+def write_graphpad_csv(df: pd.DataFrame, path: Path, metric: str = "RatioOfMeans_T_R") -> None:
     """Wide GraphPad CSV: one column per Condition for the chosen metric."""
     ensure_dir(path.parent)
     passed = df[df["QC"] == "pass"].copy() if "QC" in df.columns else df.copy()
@@ -214,7 +214,7 @@ def write_graphpad_csv(df: pd.DataFrame, path: Path, metric: str = "Ratio_T_over
         return
 
     if metric not in passed.columns or passed[metric].isna().all():
-        for fallback in ("Ratio_T_over_R", "RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole"):
+        for fallback in ("RatioOfMeans_T_R", "Enrichment_Membrane_vs_Whole", "Ratio_T_over_R"):
             if fallback in passed.columns and not passed[fallback].isna().all():
                 metric = fallback
                 break
@@ -247,8 +247,8 @@ def write_all_graphpad(df: pd.DataFrame, out_dir: Path) -> None:
             continue
         safe = metric.replace("/", "_").replace("\\", "_")
         write_graphpad_csv(df, out_dir / f"graphpad_{safe}.csv", metric=metric)
-    # Keep classic filename pointing at Dual primary metric
-    write_graphpad_csv(df, out_dir / "graphpad_MC.csv", metric="Ratio_T_over_R")
+    # Keep classic filename pointing at Dual primary metric (RatioOfMeans_T_R)
+    write_graphpad_csv(df, out_dir / "graphpad_MC.csv", metric="RatioOfMeans_T_R")
 
 
 def save_label_mask(labels: np.ndarray, path: Path) -> None:
